@@ -487,6 +487,10 @@ String Keys:
   attribution-trailer-style string attribution trailer: none, co-authored-by,
                                    or assisted-by
 
+Integer Keys:
+  request-timeout int              seconds before an LLM request is aborted;
+                                   0 waits forever (default 60)
+
 List Keys:
   context-path string             append a project context path
   global-context-path string      append a global context path
