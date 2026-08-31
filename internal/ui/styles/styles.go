@@ -26,6 +26,14 @@ const (
 
 	ArrowRightIcon string = "→"
 
+	// CodespanPadding is the padding rendered around inline code spans in
+	// markdown. It is a no-break space: it displays identically to the blank
+	// padding it replaced, but selection copies recognize it and turn it
+	// back into the original backticks (see list.HighlightContent). It is
+	// non-breaking, so word wrap treats a codespan as one unit, and the
+	// glyph itself never shows on screen.
+	CodespanPadding string = "\u00a0"
+
 	ToolPending string = "●"
 	ToolSuccess string = "✓"
 	ToolError   string = "×"
