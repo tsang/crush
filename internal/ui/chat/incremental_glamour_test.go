@@ -951,3 +951,37 @@ func TestStreamingMarkdown_RelaxedBoundaryRespectsHazards(t *testing.T) {
 		})
 	}
 }
+
+// TestStreamingMarkdown_LastLinesMatchesOutput pins the incrementally
+// tracked line count to the value a fresh countLines would produce.
+// renderThinking sizes its "N lines hidden" truncation hint from
+// LastLines, so any drift here shows up as a wrong number on screen.
+func TestStreamingMarkdown_LastLinesMatchesOutput(t *testing.T) {
+	t.Parallel()
+
+	const width = 80
+
+	docs := map[string]string{
+		"blank-line-free prose": longProse(400),
+		"paragraphs":            strings.Repeat("A paragraph of reasoning that runs on for a while.\n\n", 120),
+		"mixed":                 longProse(60) + "\n\n" + strings.Repeat("- a list item\n", 30) + "\n\n" + longProse(200),
+		"fenced":                "```go\nfunc main() {}\n```\n\n" + longProse(200),
+		"table":                 "| a | b |\n| - | - |\n| 1 | 2 |\n\n" + longProse(200),
+	}
+
+	for name, doc := range docs {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := newTestRenderer(t, width)
+			var sm streamingMarkdown
+			for i, p := range progressivePrefixes(doc, 60) {
+				if p == "" {
+					continue
+				}
+				out := sm.Render(p, width, r)
+				require.Equalf(t, countLines(strings.TrimSpace(out)), sm.LastLines(),
+					"step %d (len=%d): tracked line count must match the output", i, len(p))
+			}
+		})
+	}
+}
