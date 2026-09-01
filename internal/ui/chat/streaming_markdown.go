@@ -146,6 +146,9 @@ func (s *streamingMarkdown) Render(content string, width int, renderer *glamour.
 func (s *streamingMarkdown) tryAdvanceFromEmpty(content string, width int, renderer *glamour.TermRenderer) {
 	boundary := findSafeMarkdownBoundary(content)
 	if boundary <= 0 {
+		boundary = s.relaxedBoundary(content, 0)
+	}
+	if boundary <= 0 {
 		return
 	}
 	prefix := content[:boundary]
@@ -171,7 +174,10 @@ func (s *streamingMarkdown) tryAdvanceFromEmpty(content string, width int, rende
 func (s *streamingMarkdown) findBoundaryAfter(content string) int {
 	// When there is no stable prefix, fall back to the full scan.
 	if len(s.stablePrefix) == 0 {
-		return findSafeMarkdownBoundary(content)
+		if b := findSafeMarkdownBoundary(content); b > 0 {
+			return b
+		}
+		return s.relaxedBoundary(content, 0)
 	}
 
 	// Scan blank-line candidates from latest to earliest, but only
@@ -182,10 +188,67 @@ func (s *streamingMarkdown) findBoundaryAfter(content string) int {
 			return p
 		}
 	}
+	if b := s.relaxedBoundary(content, len(s.stablePrefix)); b > len(s.stablePrefix) {
+		return b
+	}
 	// No new boundary found after the stable prefix. Return the
 	// stable prefix length so the caller takes the "boundary <=
 	// len(stablePrefix)" path (render trailing fresh, keep cache).
 	return len(s.stablePrefix)
+}
+
+// relaxBoundaryAfter bounds how much unstable tail a flush will
+// re-render. Prose holding no blank line never satisfies the
+// blank-line predicate, so the cache never advances and every flush
+// re-renders the whole document: O(n) per tick, O(n^2) over a turn. A
+// reasoning trace that reaches a few hundred KB burns tens of GB of
+// churn that way, which is enough to outrun the GC (#3162).
+const relaxBoundaryAfter = 8 << 10
+
+// relaxedBoundaryCandidates caps how many newline candidates one
+// flush will validate, keeping the search cost flat when none of them
+// pass.
+const relaxedBoundaryCandidates = 8
+
+// relaxedBoundary looks for a cut at a plain newline once the tail
+// after `after` has outgrown [relaxBoundaryAfter]. Candidates are
+// still validated by the same predicate the blank-line search uses,
+// so every construct check survives; the only conservatism given up
+// is paragraph wrapping across the cut, which costs one re-wrap at a
+// point the reader has usually already scrolled past.
+//
+// Returns -1 while the tail is still small, and when no candidate
+// validates — the caller then behaves exactly as it did before.
+// Content with no newline at all has nothing to cut on and stays on
+// the full-render path.
+func (s *streamingMarkdown) relaxedBoundary(content string, after int) int {
+	if len(content)-after <= relaxBoundaryAfter {
+		return -1
+	}
+	tried := 0
+	for p := newlineBefore(content, len(content)); p > after; p = newlineBefore(content, p-1) {
+		if s.isSafeBoundaryIncremental(content, p) {
+			return p
+		}
+		if tried++; tried >= relaxedBoundaryCandidates {
+			break
+		}
+	}
+	return -1
+}
+
+// newlineBefore returns the byte offset of the first character AFTER
+// the latest newline that ends strictly before `until`, or -1 when
+// there is none.
+func newlineBefore(content string, until int) int {
+	if until <= 0 {
+		return -1
+	}
+	nl := strings.LastIndexByte(content[:until], '\n')
+	if nl < 0 {
+		return -1
+	}
+	return nl + 1
 }
 
 // isSafeBoundaryIncremental validates a boundary candidate at
