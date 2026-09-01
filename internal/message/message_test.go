@@ -2,6 +2,7 @@ package message
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -692,4 +693,36 @@ func TestUpdate_StructuralFlushUsesMustDeliver(t *testing.T) {
 				"structural terminal event must not be silently dropped via lossy Publish")
 		})
 	}
+}
+
+// TestPendingStateDoesNotRetainPayload guards the fix for the
+// unbounded heap growth reported in #3162: pending entries live for the
+// life of the service, so once a message is fully flushed they must
+// hold bookkeeping only, never the message parts.
+func TestPendingStateDoesNotRetainPayload(t *testing.T) {
+	t.Parallel()
+
+	svc, sessionID := newTestService(t, WithDebounce(time.Millisecond))
+	s := svc.(*service)
+
+	msg, err := svc.Create(t.Context(), sessionID, CreateMessageParams{
+		Role:  Assistant,
+		Parts: []ContentPart{},
+	})
+	require.NoError(t, err)
+
+	msg.AppendReasoningContent(strings.Repeat("x", 64*1024))
+	msg.AddToolCall(ToolCall{ID: "tc-1", Name: "bash", Finished: true})
+	msg.AddFinish(FinishReasonEndTurn, "", "")
+	require.NoError(t, svc.Update(t.Context(), msg))
+	require.NoError(t, svc.Flush(t.Context(), msg.ID))
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.pending[msg.ID]
+	require.NotNil(t, p)
+	require.False(t, p.dirty)
+	require.Empty(t, p.latest.Parts, "flushed pending state still pins the message parts")
+	require.True(t, p.hasFlushed)
+	require.Equal(t, []bool{true}, p.baseline.toolCallsFinished)
 }
