@@ -505,7 +505,7 @@ func (p *Permissions) renderHeader(contentWidth int) string {
 	// Scope tiers offered by the session grant buttons, shown directly under
 	// the tool name so the breadth of each choice is the first thing read.
 	if p.permission.Subject != "" {
-		lines = append(lines, p.renderKeyValue("Cmd", p.permission.Subject, contentWidth))
+		lines = append(lines, p.renderKeyValue("Cmd ", p.permission.Subject, contentWidth))
 	}
 	if p.hasScopeTiers() {
 		args := strings.TrimPrefix(p.permission.SubjectFull, p.permission.Subject+" ")
@@ -841,7 +841,16 @@ func (p *Permissions) renderButtons(contentWidth int, fullscreen bool) string {
 		align = lipgloss.Center
 	}
 	if lipgloss.Width(content) > contentWidth {
-		content = common.ButtonGroup(p.com.Styles, buttons, "\n")
+		if len(buttons) == 4 {
+			// Two rows of two: keeps Allow/Deny semantics visible
+			// instead of a four-deep single-column tower.
+			content = strings.Join([]string{
+				common.ButtonGroup(p.com.Styles, buttons[:2], " "),
+				common.ButtonGroup(p.com.Styles, buttons[2:], " "),
+			}, "\n")
+		} else {
+			content = common.ButtonGroup(p.com.Styles, buttons, "\n")
+		}
 		align = lipgloss.Center
 	}
 

@@ -44,12 +44,14 @@ type CreatePermissionRequest struct {
 	Params      any    `json:"params"`
 	Path        string `json:"path"`
 	// Subject narrows a grant to a specific invocation of a tool beyond
-	// Path. For bash it is the command binary (e.g. "git"); the cmd+args
-	// shape lives in SubjectFull. An allow-for-session stores whichever
-	// tier the user approves, namespaced by scopeCmd/scopeArgs.
+	// Path. For bash it is the command binary (e.g. "git"); the
+	// cmd+subcommand shape lives in SubjectFull. An allow-for-session
+	// stores whichever tier the user approves, namespaced by
+	// ScopeCmd/ScopeArgs.
 	Subject string `json:"subject"`
-	// SubjectFull is the command with its arguments (e.g. "git commit -m
-	// x"). Grants storing the args tier match only this shape.
+	// SubjectFull is the command with its subcommand (e.g. "git commit"),
+	// i.e. binary plus first non-flag argument. Grants storing the args
+	// tier match only that cmd+subcommand shape.
 	SubjectFull string `json:"subject_full,omitempty"`
 }
 
@@ -171,10 +173,10 @@ func (s *permissionService) resolve(permission PermissionRequest, granted, denie
 }
 
 // Grant scope tiers. A session grant stores its subject namespaced by the
-// tier the user approved: ScopeCmd covers any invocation of the command,
-// ScopeArgs only the command-with-args shape. Un-namespaced subjects are
-// legacy grants matched verbatim (empty subject keeps the pre-tier
-// tool+action+path behavior).
+// tier the user approved: ScopeCmd covers every invocation of the command
+// binary, ScopeArgs only the cmd+subcommand shape the user saw in the
+// dialog. Un-namespaced subjects are legacy grants matched verbatim
+// (empty subject keeps the pre-tier tool+action+path behavior).
 const (
 	ScopeCmd  = "cmd:"
 	ScopeArgs = "args:"

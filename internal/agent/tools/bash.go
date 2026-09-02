@@ -38,16 +38,14 @@ type BashPermissionsParams struct {
 	AutoBackgroundAfter int    `json:"auto_background_after"`
 }
 
-// permissionSubjectScope derives the Cmd+Args grant tier: an
-// allow-for-session covering the invocation the user approved instead of
-// every command in the working directory. Each &&, ||, or ; separated
-// segment contributes its first two significant tokens (skipping flags, env
-// assignments, and redirections); pipeline stages are ignored because they
-// only consume the primary stage's streams. Subjects are sorted, deduped,
-// and joined with "+". The empty command yields "bash".
-//
-// Wiring for this tier lives in separate-cmd-args-feature.md; today the
-// dialog grants permissionSubjectCmd.
+// permissionSubjectScope derives the Cmd+Args tier: cmd + first non-flag
+// argument, read as a subcommand (e.g. "git commit"), so an allow-for-session
+// covering that subcommand of the binary instead of every command in the
+// working directory. Each &&, ||, or ; separated segment contributes its
+// first two significant tokens (skipping flags, env assignments, and
+// redirections); pipeline stages are ignored because they only consume the
+// primary stage's streams. Subjects are sorted, deduped, and joined with
+// "+". The empty command yields "bash".
 func permissionSubjectScope(command string) string {
 	flat := strings.NewReplacer("&&", "\n", "||", "\n", ";", "\n").Replace(command)
 	var subjects []string
@@ -79,10 +77,11 @@ func permissionSubjectScope(command string) string {
 	return strings.Join(slices.Compact(subjects), "+")
 }
 
-// permissionSubjectCmd derives the Cmd grant tier: the binaries across &&,
-// ||, or ; separated segments (skipping flags, env assignments, and
+// permissionSubjectCmd derives the Cmd tier: the binaries across &&, ||,
+// or ; separated segments (skipping flags, env assignments, and
 // redirections, ignoring pipeline stages), sorted, deduped, joined with "+".
-// The empty command yields "bash".
+// An allow-for-session at this tier covers every invocation of these
+// binaries regardless of subcommand. The empty command yields "bash".
 func permissionSubjectCmd(command string) string {
 	flat := strings.NewReplacer("&&", "\n", "||", "\n", ";", "\n").Replace(command)
 	var subjects []string
