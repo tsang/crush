@@ -458,8 +458,10 @@ func (p *Permissions) renderHeader(contentWidth int) string {
 
 	// Scope remembered by the session grant, shown directly under the tool
 	// name so the breadth of the grant is the first thing the user reads.
+	// Binary-only for now; the Cmd+Args tier is specced in
+	// separate-cmd-args-feature.md.
 	if p.permission.Subject != "" {
-		lines = append(lines, p.renderKeyValue("Cmd+Arg1", p.permission.Subject, contentWidth))
+		lines = append(lines, p.renderKeyValue("Cmd", p.permission.Subject, contentWidth))
 	}
 
 	// Show generic Path only for tools that don't render their own file/path line.
@@ -769,7 +771,7 @@ func (p *Permissions) renderContentPanel(content string, width int) string {
 func (p *Permissions) renderButtons(contentWidth int, fullscreen bool) string {
 	sessionLabel := "Allow for Session"
 	if p.permission.ToolName == tools.BashToolName && p.permission.Subject != "" {
-		sessionLabel = "Allow Cmd+Arg1 for Session"
+		sessionLabel = "Allow Cmd for Session"
 	}
 	buttons := []common.ButtonOpts{
 		{Text: "Allow", UnderlineIndex: 0, Selected: p.selectedOption == 0},

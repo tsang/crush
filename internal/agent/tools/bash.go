@@ -38,13 +38,16 @@ type BashPermissionsParams struct {
 	AutoBackgroundAfter int    `json:"auto_background_after"`
 }
 
-// permissionSubjectScope derives a stable grant scope from a shell command so
-// that an allow-for-session covers the invocation the user approved instead
-// of every command in the working directory. Each &&, ||, or ; separated
+// permissionSubjectScope derives the Cmd+Args grant tier: an
+// allow-for-session covering the invocation the user approved instead of
+// every command in the working directory. Each &&, ||, or ; separated
 // segment contributes its first two significant tokens (skipping flags, env
 // assignments, and redirections); pipeline stages are ignored because they
 // only consume the primary stage's streams. Subjects are sorted, deduped,
 // and joined with "+". The empty command yields "bash".
+//
+// Wiring for this tier lives in separate-cmd-args-feature.md; today the
+// dialog grants permissionSubjectCmd.
 func permissionSubjectScope(command string) string {
 	flat := strings.NewReplacer("&&", "\n", "||", "\n", ";", "\n").Replace(command)
 	var subjects []string
@@ -67,6 +70,35 @@ func permissionSubjectScope(command string) string {
 		}
 		if len(toks) > 0 {
 			subjects = append(subjects, strings.Join(toks, " "))
+		}
+	}
+	if len(subjects) == 0 {
+		return "bash"
+	}
+	slices.Sort(subjects)
+	return strings.Join(slices.Compact(subjects), "+")
+}
+
+// permissionSubjectCmd derives the Cmd grant tier: the binaries across &&,
+// ||, or ; separated segments (skipping flags, env assignments, and
+// redirections, ignoring pipeline stages), sorted, deduped, joined with "+".
+// The empty command yields "bash".
+func permissionSubjectCmd(command string) string {
+	flat := strings.NewReplacer("&&", "\n", "||", "\n", ";", "\n").Replace(command)
+	var subjects []string
+	for _, seg := range strings.Split(flat, "\n") {
+		if idx := strings.Index(seg, "|"); idx >= 0 {
+			seg = seg[:idx]
+		}
+		for _, tok := range strings.Fields(seg) {
+			if strings.HasPrefix(tok, "-") || strings.ContainsAny(tok, "<>") {
+				continue
+			}
+			if eq := strings.IndexByte(tok, '='); eq > 0 && !strings.Contains(tok[:eq], "/") {
+				continue
+			}
+			subjects = append(subjects, filepath.Base(tok))
+			break
 		}
 	}
 	if len(subjects) == 0 {
@@ -274,7 +306,7 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 						Action:      "execute",
 						Description: fmt.Sprintf("Execute command: %s", params.Command),
 						Params:      BashPermissionsParams(params),
-						Subject:     permissionSubjectScope(params.Command),
+						Subject:     permissionSubjectCmd(params.Command),
 					},
 				)
 				if err != nil {
