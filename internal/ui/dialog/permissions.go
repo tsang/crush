@@ -456,6 +456,12 @@ func (p *Permissions) renderHeader(contentWidth int) string {
 
 	lines := []string{title, "", toolLine}
 
+	// Scope remembered by the session grant, shown directly under the tool
+	// name so the breadth of the grant is the first thing the user reads.
+	if p.permission.Subject != "" {
+		lines = append(lines, p.renderKeyValue("Cmd+Arg1", p.permission.Subject, contentWidth))
+	}
+
 	// Show generic Path only for tools that don't render their own file/path line.
 	switch p.permission.ToolName {
 	case tools.EditToolName, tools.WriteToolName, tools.MultiEditToolName,
@@ -471,11 +477,6 @@ func (p *Permissions) renderHeader(contentWidth int) string {
 	case tools.BashToolName:
 		if params, ok := p.permission.Params.(tools.BashPermissionsParams); ok {
 			lines = append(lines, p.renderKeyValue("Desc", params.Description, contentWidth))
-		}
-		// Make the remembered scope of "Allow for Session" explicit rather
-		// than letting it implicitly mean every command in the directory.
-		if p.permission.Subject != "" {
-			lines = append(lines, p.renderKeyValue("Session grant", p.permission.Subject, contentWidth))
 		}
 	case tools.DownloadToolName:
 		if params, ok := p.permission.Params.(tools.DownloadPermissionsParams); ok {
@@ -766,9 +767,13 @@ func (p *Permissions) renderContentPanel(content string, width int) string {
 }
 
 func (p *Permissions) renderButtons(contentWidth int, fullscreen bool) string {
+	sessionLabel := "Allow for Session"
+	if p.permission.ToolName == tools.BashToolName && p.permission.Subject != "" {
+		sessionLabel = "Allow Cmd+Arg1 for Session"
+	}
 	buttons := []common.ButtonOpts{
 		{Text: "Allow", UnderlineIndex: 0, Selected: p.selectedOption == 0},
-		{Text: "Allow for Session", UnderlineIndex: 10, Selected: p.selectedOption == 1},
+		{Text: sessionLabel, UnderlineIndex: strings.Index(sessionLabel, "Session"), Selected: p.selectedOption == 1},
 		{Text: "Deny", UnderlineIndex: 0, Selected: p.selectedOption == 2},
 	}
 
