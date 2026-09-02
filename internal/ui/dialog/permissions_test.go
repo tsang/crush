@@ -125,13 +125,15 @@ func TestPermissions_ScopeTiers(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "cmd:git", resp.Permission.Subject)
 
-	// Cycling covers four options and wraps; deny sits last.
+	// Cycling covers four options: deny is last, then wrap to zero.
 	p = scoped()
 	require.Equal(t, 4, p.numOptions())
-	for range 3 {
+	for range 2 {
 		p.HandleMsg(tea.KeyPressMsg{Code: tea.KeyTab})
-		require.NotEqual(t, 3, p.selectedOption, "deny should not be reached in 3 tabs")
+		require.NotEqual(t, 3, p.selectedOption, "deny should be last")
 	}
+	p.HandleMsg(tea.KeyPressMsg{Code: tea.KeyTab})
+	require.Equal(t, 3, p.selectedOption, "fourth option is deny")
 	p.HandleMsg(tea.KeyPressMsg{Code: tea.KeyTab})
 	require.Equal(t, 0, p.selectedOption)
 
