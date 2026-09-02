@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/styles"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 )
 
@@ -168,4 +169,51 @@ func TestPermissions_NoScopeTiersKeepsThreeOptions(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, PermissionAllowForSession, resp.Action)
 	require.Empty(t, resp.Permission.Subject, "legacy grant stays verbatim")
+}
+
+// TestPermissions_UnknownScopeOffersNoSessionGrant verifies that a command
+// whose binaries could not be determined offers only Allow and Deny, so a
+// session grant can never be minted from the unknown marker and reused.
+func TestPermissions_UnknownScopeOffersNoSessionGrant(t *testing.T) {
+	t.Parallel()
+
+	unknown := func() *Permissions {
+		p := newTestPermissions(t)
+		p.permission.Subject = permission.ScopeUnknown
+		p.permission.SubjectFull = permission.ScopeUnknown
+		return p
+	}
+
+	p := unknown()
+	require.Equal(t, 2, p.numOptions(), "only Allow and Deny")
+	require.False(t, p.canGrantSession())
+	require.False(t, p.hasScopeTiers())
+
+	// Cycling cannot land on a session button.
+	for range 4 {
+		p.HandleMsg(tea.KeyPressMsg{Code: tea.KeyTab})
+		require.Less(t, p.selectedOption, 2)
+	}
+
+	// The session key falls back to allowing this call only.
+	p = unknown()
+	action := p.HandleMsg(keyMsg('s'))
+	resp, ok := action.(ActionPermissionResponse)
+	require.True(t, ok)
+	require.Equal(t, PermissionAllow, resp.Action, "session key must not create a grant")
+
+	// Enter on the last option denies.
+	p = unknown()
+	p.selectedOption = 1
+	action = p.HandleMsg(tea.KeyPressMsg{Code: tea.KeyEnter})
+	resp, ok = action.(ActionPermissionResponse)
+	require.True(t, ok)
+	require.Equal(t, PermissionDeny, resp.Action)
+
+	// The rendered button row must not offer any session grant. Buttons are
+	// rendered with styles that split their words, so strip before matching.
+	buttons := ansi.Strip(p.renderButtons(120, false))
+	require.NotContains(t, buttons, "Session")
+	require.Contains(t, buttons, "Allow")
+	require.Contains(t, buttons, "Deny")
 }

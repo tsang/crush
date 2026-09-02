@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -174,7 +175,7 @@ func (s *permissionService) resolve(permission PermissionRequest, granted, denie
 
 // Grant scope tiers. A session grant stores its subject namespaced by the
 // tier the user approved: ScopeCmd covers every invocation of the command
-// binary, ScopeArgs only the cmd+subcommand shape the user saw in the
+// binaries, ScopeArgs only the cmd+subcommand shapes the user saw in the
 // dialog. Un-namespaced subjects are legacy grants matched verbatim
 // (empty subject keeps the pre-tier tool+action+path behavior).
 const (
@@ -182,47 +183,129 @@ const (
 	ScopeArgs = "args:"
 )
 
+// ScopeUnknown marks a command whose binaries cannot be determined, e.g. a
+// primary built by expansion ("$BIN run") or a command that fails to parse.
+// Requests carrying it are never covered by a grant and never create one, so
+// the user is asked every time rather than unknowingly approving something the
+// scope derivation could not read.
+const ScopeUnknown = "?"
+
+// SubjectSeparator joins tokens in a composed subject, and MaxSubjectTokens
+// bounds how many a single command may contribute. ValidToken keeps any
+// token from containing the separator, so encoding a subject and splitting it
+// again round-trips exactly. That matters now that each token in a cmd-tier
+// grant becomes its own live session grant: a mis-split token such as `g++`
+// arriving as `g` would silently widen what runs without prompting.
+const (
+	SubjectSeparator = ","
+	MaxSubjectTokens = 32
+)
+
+// ValidToken reports whether s is safe to embed in a composed subject.
+func ValidToken(s string) bool {
+	return s != "" && !strings.ContainsAny(s, SubjectSeparator+" \t\n")
+}
+
+// JoinTokens sorts, dedupes, and joins tokens into a subject.
+func JoinTokens(tokens []string) string {
+	slices.Sort(tokens)
+	return strings.Join(slices.Compact(tokens), SubjectSeparator)
+}
+
+// SplitSubject decodes a subject written by JoinTokens. It returns nil for
+// the unknown marker so a "?" never decodes into a grantable token.
+func SplitSubject(subject string) []string {
+	if subject == "" || subject == ScopeUnknown {
+		return nil
+	}
+	parts := strings.Split(subject, SubjectSeparator)
+	tokens := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part != "" {
+			tokens = append(tokens, part)
+		}
+	}
+	return tokens
+}
+
 // ScopeSubject composes a stored subject from a tier prefix and the raw
 // scope string.
 func ScopeSubject(prefix, subject string) string { return prefix + subject }
 
 // grantCovers reports whether any stored session grant covers the incoming
-// request: the raw subject (legacy), the args tier, or the cmd tier.
+// request. The legacy raw subject and the args tier are matched verbatim.
+// The cmd tier is all-or-nothing over the request's binaries: every one must
+// carry its own grant, so a chain containing a binary that was never approved
+// still prompts.
 func (s *permissionService) grantCovers(permission PermissionRequest) bool {
-	subjects := []string{permission.Subject}
+	if permission.Subject == ScopeUnknown {
+		return false
+	}
+	key := PermissionKey{
+		SessionID: permission.SessionID,
+		ToolName:  permission.ToolName,
+		Action:    permission.Action,
+		Path:      permission.Path,
+	}
+	if _, ok := s.sessionPermissions.Get(key.WithSubject(permission.Subject)); ok {
+		return true
+	}
 	if permission.SubjectFull != "" {
-		subjects = append(subjects, ScopeArgs+permission.SubjectFull)
-	}
-	if permission.Subject != "" {
-		subjects = append(subjects, ScopeCmd+permission.Subject)
-	}
-	for _, subject := range subjects {
-		if _, ok := s.sessionPermissions.Get(PermissionKey{
-			SessionID: permission.SessionID,
-			ToolName:  permission.ToolName,
-			Action:    permission.Action,
-			Path:      permission.Path,
-			Subject:   subject,
-		}); ok {
+		if _, ok := s.sessionPermissions.Get(key.WithSubject(ScopeSubject(ScopeArgs, permission.SubjectFull))); ok {
 			return true
 		}
 	}
-	return false
+	bins := SplitSubject(permission.Subject)
+	if len(bins) == 0 {
+		return false
+	}
+	if _, ok := s.sessionPermissions.Get(key.WithSubject(ScopeSubject(ScopeCmd, permission.Subject))); ok {
+		return true
+	}
+	for _, bin := range bins {
+		if _, ok := s.sessionPermissions.Get(key.WithSubject(ScopeSubject(ScopeCmd, bin))); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// WithSubject returns a copy of the key scoped to a single subject, so
+// coverage can probe several tiers without repeating the identity fields.
+func (k PermissionKey) WithSubject(subject string) PermissionKey {
+	k.Subject = subject
+	return k
 }
 
 func (s *permissionService) GrantPersistent(permission PermissionRequest) bool {
+	// An unknown subject means the scope derivation could not read the
+	// command, so there is nothing meaningful to remember: resolving it
+	// grants this call only.
+	if permission.Subject == ScopeUnknown {
+		return s.Grant(permission)
+	}
 	// Record the persistent grant only if this call wins the
 	// pending-request race. Otherwise a losing GrantPersistent that
 	// lost to a Deny would still leave an auto-approve entry behind,
 	// silently flipping later denied calls to allowed.
 	return s.resolve(permission, true, false, func() {
-		s.sessionPermissions.Set(PermissionKey{
+		key := PermissionKey{
 			SessionID: permission.SessionID,
 			ToolName:  permission.ToolName,
 			Action:    permission.Action,
 			Path:      permission.Path,
 			Subject:   permission.Subject,
-		}, true)
+		}
+		s.sessionPermissions.Set(key, true)
+		if _, ok := strings.CutPrefix(permission.Subject, ScopeCmd); !ok {
+			return
+		}
+		// Fan the cmd tier out one key per binary, so approving a,b,c
+		// also covers any subset of those binaries. A binary that was
+		// never granted has no key of its own and still prompts.
+		for _, bin := range SplitSubject(strings.TrimPrefix(permission.Subject, ScopeCmd)) {
+			s.sessionPermissions.Set(key.WithSubject(ScopeSubject(ScopeCmd, bin)), true)
+		}
 	})
 }
 

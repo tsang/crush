@@ -61,7 +61,7 @@ type Permissions struct {
 	fullscreen   bool // true when dialog is fullscreen
 
 	permission     permission.PermissionRequest
-	selectedOption int // 0: Allow, 1: Allow Cmd for Session, 2: Deny (plus 2: Allow Cmd+Args and 3: Deny when scope tiers apply)
+	selectedOption int // 0: Allow, 1: Allow Cmd for Session, 2: Deny (plus 2: Allow Cmd+Args and 3: Deny when scope tiers apply; an unknown scope leaves only Allow and Deny)
 
 	viewport      viewport.Model
 	viewportDirty bool // true when viewport content needs to be re-rendered
@@ -312,6 +312,15 @@ func (p *Permissions) HandleMsg(msg tea.Msg) Action {
 }
 
 func (p *Permissions) selectCurrentOption() tea.Msg {
+	if !p.canGrantSession() {
+		// Only Allow and Deny are offered: there is no readable scope to
+		// remember, so a grant would be minted from "?" and cover the next
+		// unreadable command.
+		if p.selectedOption == 0 {
+			return p.respond(PermissionAllow)
+		}
+		return p.respond(PermissionDeny)
+	}
 	switch {
 	case p.selectedOption == 0:
 		return p.respond(PermissionAllow)
@@ -324,6 +333,13 @@ func (p *Permissions) selectCurrentOption() tea.Msg {
 	}
 }
 
+// canGrantSession reports whether this request can be remembered for the
+// session. An unknown scope means the derivation could not read the command's
+// binaries, so the user must decide each time.
+func (p *Permissions) canGrantSession() bool {
+	return p.permission.Subject != permission.ScopeUnknown
+}
+
 // hasScopeTiers reports whether the request exposes the separate Cmd and
 // Cmd+Args session grants: bash calls with two distinct scope strings.
 func (p *Permissions) hasScopeTiers() bool {
@@ -334,15 +350,23 @@ func (p *Permissions) hasScopeTiers() bool {
 }
 
 func (p *Permissions) numOptions() int {
-	if p.hasScopeTiers() {
+	switch {
+	case !p.canGrantSession():
+		return 2
+	case p.hasScopeTiers():
 		return 4
+	default:
+		return 3
 	}
-	return 3
 }
 
 // allowSession grants the session permission at the appropriate tier: the
-// cmd tier (prefixed) for scoped bash calls, legacy verbatim otherwise.
+// cmd tier (prefixed) for scoped bash calls, legacy verbatim otherwise. An
+// unknown scope falls back to allowing this call only.
 func (p *Permissions) allowSession() tea.Msg {
+	if !p.canGrantSession() {
+		return p.respond(PermissionAllow)
+	}
 	if p.permission.ToolName == tools.BashToolName && p.permission.Subject != "" {
 		return p.respondSession(permission.ScopeSubject(permission.ScopeCmd, p.permission.Subject))
 	}
@@ -823,7 +847,9 @@ func (p *Permissions) renderButtons(contentWidth int, fullscreen bool) string {
 	}
 	buttons := []common.ButtonOpts{
 		{Text: "Allow", UnderlineIndex: 0, Selected: p.selectedOption == 0},
-		{Text: sessionLabel, UnderlineIndex: strings.Index(sessionLabel, "Session"), Selected: p.selectedOption == 1},
+	}
+	if p.canGrantSession() {
+		buttons = append(buttons, common.ButtonOpts{Text: sessionLabel, UnderlineIndex: strings.Index(sessionLabel, "Session"), Selected: p.selectedOption == 1})
 	}
 	if p.hasScopeTiers() {
 		argsLabel := "Allow Cmd+Args for Session"

@@ -9,11 +9,11 @@ import (
 	"html/template"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
+	"mvdan.cc/sh/v3/syntax"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/config"
@@ -38,73 +38,73 @@ type BashPermissionsParams struct {
 	AutoBackgroundAfter int    `json:"auto_background_after"`
 }
 
-// permissionSubjectScope derives the Cmd+Args tier: cmd + first non-flag
-// argument, read as a subcommand (e.g. "git commit"), so an allow-for-session
-// covering that subcommand of the binary instead of every command in the
-// working directory. Each &&, ||, or ; separated segment contributes its
-// first two significant tokens (skipping flags, env assignments, and
-// redirections); pipeline stages are ignored because they only consume the
-// primary stage's streams. Subjects are sorted, deduped, and joined with
-// "+". The empty command yields "bash".
-func permissionSubjectScope(command string) string {
-	flat := strings.NewReplacer("&&", "\n", "||", "\n", ";", "\n").Replace(command)
-	var subjects []string
-	for _, seg := range strings.Split(flat, "\n") {
-		if idx := strings.Index(seg, "|"); idx >= 0 {
-			seg = seg[:idx]
-		}
-		var toks []string
-		for _, tok := range strings.Fields(seg) {
-			if strings.HasPrefix(tok, "-") || strings.ContainsAny(tok, "<>") {
-				continue
-			}
-			if eq := strings.IndexByte(tok, '='); eq > 0 && !strings.Contains(tok[:eq], "/") {
-				continue
-			}
-			toks = append(toks, filepath.Base(tok))
-			if len(toks) == 2 {
-				break
-			}
-		}
-		if len(toks) > 0 {
-			subjects = append(subjects, strings.Join(toks, " "))
-		}
+// permissionSubjects derives both session grant tiers by walking the parsed
+// command with the same mvdan/sh grammar that executes it (run.go). The Cmd
+// tier is every literal binary in the tree; the Cmd+Args tier pairs each
+// simple command with its first bare-word, non-flag argument.
+//
+// Walking the AST instead of splitting the string means quoting, heredocs,
+// subshells, and command substitution are resolved by the parser rather than
+// re-derived here: a ';' inside a quoted argument stays one argument instead
+// of becoming a segment separator, pipeline tails are included because they
+// execute, and keywords like `for` are not simple commands so they can never
+// become a grantable binary.
+//
+// The derivation is fail-closed. A command that does not parse, or whose
+// primary is not a bare literal ("$BIN run"), yields permission.ScopeUnknown:
+// no grant can cover it and none can be minted from it.
+func permissionSubjects(command string) (cmd, args string) {
+	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	if err != nil {
+		return permission.ScopeUnknown, permission.ScopeUnknown
 	}
-	if len(subjects) == 0 {
-		return "bash"
+	var bins, shapes []string
+	unknown := false
+	syntax.Walk(file, func(n syntax.Node) bool {
+		call, ok := n.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			// Compound commands and bare env assignments run nothing of
+			// their own; their bodies are visited separately.
+			return true
+		}
+		primary := call.Args[0].Lit()
+		if primary == "" {
+			unknown = true
+			return false
+		}
+		bin := filepath.Base(primary)
+		if !permission.ValidToken(bin) {
+			unknown = true
+			return false
+		}
+		bins = append(bins, bin)
+		shapes = append(shapes, subjectShape(bin, call.Args[1:]))
+		return true
+	})
+	if unknown || len(bins) == 0 || len(bins) > permission.MaxSubjectTokens {
+		return permission.ScopeUnknown, permission.ScopeUnknown
 	}
-	slices.Sort(subjects)
-	return strings.Join(slices.Compact(subjects), "+")
+	return permission.JoinTokens(bins), permission.JoinTokens(shapes)
 }
 
-// permissionSubjectCmd derives the Cmd tier: the binaries across &&, ||,
-// or ; separated segments (skipping flags, env assignments, and
-// redirections, ignoring pipeline stages), sorted, deduped, joined with "+".
-// An allow-for-session at this tier covers every invocation of these
-// binaries regardless of subcommand. The empty command yields "bash".
-func permissionSubjectCmd(command string) string {
-	flat := strings.NewReplacer("&&", "\n", "||", "\n", ";", "\n").Replace(command)
-	var subjects []string
-	for _, seg := range strings.Split(flat, "\n") {
-		if idx := strings.Index(seg, "|"); idx >= 0 {
-			seg = seg[:idx]
-		}
-		for _, tok := range strings.Fields(seg) {
-			if strings.HasPrefix(tok, "-") || strings.ContainsAny(tok, "<>") {
-				continue
-			}
-			if eq := strings.IndexByte(tok, '='); eq > 0 && !strings.Contains(tok[:eq], "/") {
-				continue
-			}
-			subjects = append(subjects, filepath.Base(tok))
+// subjectShape pairs a binary with the first argument that reads as a
+// subcommand, stopping at the first positional word so quoted data cannot be
+// mistaken for one.
+func subjectShape(bin string, args []*syntax.Word) string {
+	for _, arg := range args {
+		word := arg.Lit()
+		if word == "" {
 			break
 		}
+		if strings.HasPrefix(word, "-") {
+			continue
+		}
+		if permission.ValidToken(word) {
+			return bin + " " + word
+		}
+		break
 	}
-	if len(subjects) == 0 {
-		return "bash"
-	}
-	slices.Sort(subjects)
-	return strings.Join(slices.Compact(subjects), "+")
+	return bin
 }
 
 type BashResponseMetadata struct {
@@ -295,6 +295,7 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 				return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for executing shell command")
 			}
 			if !isSafeReadOnly {
+				cmdSubject, argsSubject := permissionSubjects(params.Command)
 				p, err := permissions.Request(
 					ctx,
 					permission.CreatePermissionRequest{
@@ -305,8 +306,8 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 						Action:      "execute",
 						Description: fmt.Sprintf("Execute command: %s", params.Command),
 						Params:      BashPermissionsParams(params),
-						Subject:     permissionSubjectCmd(params.Command),
-						SubjectFull: permissionSubjectScope(params.Command),
+						Subject:     cmdSubject,
+						SubjectFull: argsSubject,
 					},
 				)
 				if err != nil {

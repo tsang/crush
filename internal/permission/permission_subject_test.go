@@ -2,6 +2,7 @@ package permission
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -177,4 +178,106 @@ drain:
 	ok, err := service.Request(t.Context(), pull)
 	require.NoError(t, err)
 	assert.True(t, ok, "cmd grant should cover any git invocation")
+}
+
+// TestCmdGrantCoversSubsets pins the cmd tier's subset semantics: approving
+// a chain also covers any subset of the binaries you saw, but never a binary
+// you did not.
+func TestCmdGrantCoversSubsets(t *testing.T) {
+	service := NewPermissionService("/tmp", false, []string{})
+
+	req := CreatePermissionRequest{
+		SessionID:   "subset-session",
+		ToolCallID:  "call-chain",
+		ToolName:    "bash",
+		Description: "Execute command: swift build && echo done",
+		Action:      "execute",
+		Path:        "/tmp",
+		Subject:     "echo,sed,swift",
+		SubjectFull: "echo,sed,swift build",
+	}
+
+	events := service.Subscribe(t.Context())
+
+	var granted bool
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		granted, _ = service.Request(t.Context(), req)
+	}()
+	event := <-events
+	event.Payload.Subject = ScopeSubject(ScopeCmd, req.Subject)
+	require.True(t, service.GrantPersistent(event.Payload))
+	<-done
+	require.True(t, granted)
+
+	// Single binary and reordered pairs all run silently, with SubjectFull
+	// cleared so only the cmd tier can cover them.
+	for i, subject := range []string{"swift", "echo,sed", "sed,swift,echo"} {
+		sub := req
+		sub.ToolCallID = fmt.Sprintf("call-subset-%d", i)
+		sub.Subject = subject
+		sub.SubjectFull = ""
+		ok, err := service.Request(t.Context(), sub)
+		require.NoError(t, err, "subset %q should not prompt", subject)
+		assert.True(t, ok, "subset %q should auto-approve", subject)
+	}
+
+drain:
+	for {
+		select {
+		case <-events:
+		default:
+			break drain
+		}
+	}
+
+	// One unapproved binary added: the whole chain prompts again.
+	extra := req
+	extra.ToolCallID = "call-rm"
+	extra.Subject = "rm,swift"
+	extra.SubjectFull = ""
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	_, err := service.Request(ctx, extra)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "an unapproved binary must still prompt")
+}
+
+// TestUnknownSubjectNeverCovers proves the fail-closed marker is inert in
+// both directions: approving it grants only that call, and it is never
+// remembered, so the next unreadable command asks again.
+func TestUnknownSubjectNeverCovers(t *testing.T) {
+	service := NewPermissionService("/tmp", false, []string{})
+
+	req := CreatePermissionRequest{
+		SessionID:   "unknown-session",
+		ToolCallID:  "call-unknown",
+		ToolName:    "bash",
+		Description: `Execute command: "$BIN" run`,
+		Action:      "execute",
+		Path:        "/tmp",
+		Subject:     ScopeUnknown,
+		SubjectFull: ScopeUnknown,
+	}
+
+	events := service.Subscribe(t.Context())
+
+	var granted bool
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		granted, _ = service.Request(t.Context(), req)
+	}()
+	event := <-events
+	require.Equal(t, ScopeUnknown, event.Payload.Subject)
+	require.True(t, service.GrantPersistent(event.Payload))
+	<-done
+	require.True(t, granted, "approving the prompt should still run this call")
+
+	second := req
+	second.ToolCallID = "call-unknown-2"
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	_, err := service.Request(ctx, second)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "unknown scope must never be remembered")
 }
