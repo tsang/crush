@@ -307,6 +307,7 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 						Description: fmt.Sprintf("Execute command: %s", params.Command),
 						Params:      BashPermissionsParams(params),
 						Subject:     permissionSubjectCmd(params.Command),
+						SubjectFull: permissionSubjectScope(params.Command),
 					},
 				)
 				if err != nil {

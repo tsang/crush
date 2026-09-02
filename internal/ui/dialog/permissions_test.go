@@ -96,3 +96,74 @@ func TestPermissions_EscapeDenies(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, PermissionDeny, resp.Action)
 }
+
+// TestPermissions_ScopeTiers verifies the Cmd / Cmd+Args session tiers:
+// keybinds, option cycling, and the namespaced subject stored with the
+// chosen tier.
+func TestPermissions_ScopeTiers(t *testing.T) {
+	t.Parallel()
+
+	scoped := func() *Permissions {
+		p := newTestPermissions(t)
+		p.permission.Subject = "git"
+		p.permission.SubjectFull = "git commit"
+		return p
+	}
+
+	// g grants the args tier verbatim, namespaced.
+	p := scoped()
+	action := p.HandleMsg(keyMsg('g'))
+	resp, ok := action.(ActionPermissionResponse)
+	require.True(t, ok)
+	require.Equal(t, PermissionAllowForSession, resp.Action)
+	require.Equal(t, "args:git commit", resp.Permission.Subject)
+
+	// s grants the cmd tier.
+	p = scoped()
+	action = p.HandleMsg(keyMsg('s'))
+	resp, ok = action.(ActionPermissionResponse)
+	require.True(t, ok)
+	require.Equal(t, "cmd:git", resp.Permission.Subject)
+
+	// Cycling covers four options and wraps; deny sits last.
+	p = scoped()
+	require.Equal(t, 4, p.numOptions())
+	for range 3 {
+		p.HandleMsg(tea.KeyPressMsg{Code: tea.KeyTab})
+		require.NotEqual(t, 3, p.selectedOption, "deny should not be reached in 3 tabs")
+	}
+	p.HandleMsg(tea.KeyPressMsg{Code: tea.KeyTab})
+	require.Equal(t, 0, p.selectedOption)
+
+	// Enter on option 2 is the args tier, option 3 denies.
+	p.selectedOption = 2
+	action = p.HandleMsg(tea.KeyPressMsg{Code: tea.KeyEnter})
+	resp, ok = action.(ActionPermissionResponse)
+	require.True(t, ok)
+	require.Equal(t, "args:git commit", resp.Permission.Subject)
+
+	p = scoped()
+	p.selectedOption = 3
+	action = p.HandleMsg(tea.KeyPressMsg{Code: tea.KeyEnter})
+	resp, ok = action.(ActionPermissionResponse)
+	require.True(t, ok)
+	require.Equal(t, PermissionDeny, resp.Action)
+}
+
+// TestPermissions_NoScopeTiersKeepsThreeOptions verifies calls without two
+// distinct scopes (the common non-bash case) keep the original three-option
+// dialog and verbatim session subject.
+func TestPermissions_NoScopeTiersKeepsThreeOptions(t *testing.T) {
+	t.Parallel()
+
+	p := newTestPermissions(t)
+	require.Equal(t, 3, p.numOptions())
+	require.False(t, p.hasScopeTiers())
+
+	p.selectedOption = 1
+	action := p.HandleMsg(tea.KeyPressMsg{Code: tea.KeyEnter})
+	resp, ok := action.(ActionPermissionResponse)
+	require.True(t, ok)
+	require.Equal(t, PermissionAllowForSession, resp.Action)
+	require.Empty(t, resp.Permission.Subject, "legacy grant stays verbatim")
+}

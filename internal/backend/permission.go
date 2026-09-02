@@ -25,6 +25,7 @@ func (b *Backend) GrantPermission(workspaceID string, req proto.PermissionGrant)
 		Params:      req.Permission.Params,
 		Path:        req.Permission.Path,
 		Subject:     req.Permission.Subject,
+		SubjectFull: req.Permission.SubjectFull,
 	}
 
 	switch req.Action {

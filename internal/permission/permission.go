@@ -44,10 +44,13 @@ type CreatePermissionRequest struct {
 	Params      any    `json:"params"`
 	Path        string `json:"path"`
 	// Subject narrows a grant to a specific invocation of a tool beyond
-	// Path. For bash it is the command's binary plus subcommand (e.g.
-	// "git commit") so an allow-for-session does not implicitly approve
-	// every command runnable in the working directory.
+	// Path. For bash it is the command binary (e.g. "git"); the cmd+args
+	// shape lives in SubjectFull. An allow-for-session stores whichever
+	// tier the user approves, namespaced by scopeCmd/scopeArgs.
 	Subject string `json:"subject"`
+	// SubjectFull is the command with its arguments (e.g. "git commit -m
+	// x"). Grants storing the args tier match only this shape.
+	SubjectFull string `json:"subject_full,omitempty"`
 }
 
 type PermissionNotification struct {
@@ -67,6 +70,8 @@ type PermissionRequest struct {
 	Path        string `json:"path"`
 	// Subject mirrors CreatePermissionRequest.Subject.
 	Subject string `json:"subject"`
+	// SubjectFull mirrors CreatePermissionRequest.SubjectFull.
+	SubjectFull string `json:"subject_full,omitempty"`
 }
 
 type Service interface {
@@ -165,6 +170,44 @@ func (s *permissionService) resolve(permission PermissionRequest, granted, denie
 	return true
 }
 
+// Grant scope tiers. A session grant stores its subject namespaced by the
+// tier the user approved: ScopeCmd covers any invocation of the command,
+// ScopeArgs only the command-with-args shape. Un-namespaced subjects are
+// legacy grants matched verbatim (empty subject keeps the pre-tier
+// tool+action+path behavior).
+const (
+	ScopeCmd  = "cmd:"
+	ScopeArgs = "args:"
+)
+
+// ScopeSubject composes a stored subject from a tier prefix and the raw
+// scope string.
+func ScopeSubject(prefix, subject string) string { return prefix + subject }
+
+// grantCovers reports whether any stored session grant covers the incoming
+// request: the raw subject (legacy), the args tier, or the cmd tier.
+func (s *permissionService) grantCovers(permission PermissionRequest) bool {
+	subjects := []string{permission.Subject}
+	if permission.SubjectFull != "" {
+		subjects = append(subjects, ScopeArgs+permission.SubjectFull)
+	}
+	if permission.Subject != "" {
+		subjects = append(subjects, ScopeCmd+permission.Subject)
+	}
+	for _, subject := range subjects {
+		if _, ok := s.sessionPermissions.Get(PermissionKey{
+			SessionID: permission.SessionID,
+			ToolName:  permission.ToolName,
+			Action:    permission.Action,
+			Path:      permission.Path,
+			Subject:   subject,
+		}); ok {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *permissionService) GrantPersistent(permission PermissionRequest) bool {
 	// Record the persistent grant only if this call wins the
 	// pending-request race. Otherwise a losing GrantPersistent that
@@ -255,15 +298,10 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 		Action:      opts.Action,
 		Params:      opts.Params,
 		Subject:     opts.Subject,
+		SubjectFull: opts.SubjectFull,
 	}
 
-	if _, ok := s.sessionPermissions.Get(PermissionKey{
-		SessionID: permission.SessionID,
-		ToolName:  permission.ToolName,
-		Action:    permission.Action,
-		Path:      permission.Path,
-		Subject:   permission.Subject,
-	}); ok {
+	if s.grantCovers(permission) {
 		s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
 			ToolCallID: opts.ToolCallID,
 			Granted:    true,

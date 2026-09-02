@@ -61,7 +61,7 @@ type Permissions struct {
 	fullscreen   bool // true when dialog is fullscreen
 
 	permission     permission.PermissionRequest
-	selectedOption int // 0: Allow, 1: Allow for session, 2: Deny
+	selectedOption int // 0: Allow, 1: Allow Cmd for Session, 2: Deny (plus 2: Allow Cmd+Args and 3: Deny when scope tiers apply)
 
 	viewport      viewport.Model
 	viewportDirty bool // true when viewport content needs to be re-rendered
@@ -85,6 +85,7 @@ type permissionsKeyMap struct {
 	Select           key.Binding
 	Allow            key.Binding
 	AllowSession     key.Binding
+	AllowSessionArgs key.Binding
 	Deny             key.Binding
 	Close            key.Binding
 	ToggleDiffMode   key.Binding
@@ -121,7 +122,11 @@ func defaultPermissionsKeyMap() permissionsKeyMap {
 		),
 		AllowSession: key.NewBinding(
 			key.WithKeys("s", "S", "ctrl+s"),
-			key.WithHelp("s", "allow session"),
+			key.WithHelp("s", "allow cmd session"),
+		),
+		AllowSessionArgs: key.NewBinding(
+			key.WithKeys("g", "G"),
+			key.WithHelp("g", "allow cmd+args session"),
 		),
 		Deny: key.NewBinding(
 			key.WithKeys("d", "D"),
@@ -239,16 +244,21 @@ func (p *Permissions) HandleMsg(msg tea.Msg) Action {
 			// Escape denies the permission request.
 			return p.respond(PermissionDeny)
 		case key.Matches(msg, p.keyMap.Right), key.Matches(msg, p.keyMap.Tab):
-			p.selectedOption = (p.selectedOption + 1) % 3
+			p.selectedOption = (p.selectedOption + 1) % p.numOptions()
 		case key.Matches(msg, p.keyMap.Left):
-			// Add 2 instead of subtracting 1 to avoid negative modulo.
-			p.selectedOption = (p.selectedOption + 2) % 3
+			// Add numOptions-1 instead of subtracting 1 to avoid negative modulo.
+			p.selectedOption = (p.selectedOption + p.numOptions() - 1) % p.numOptions()
 		case key.Matches(msg, p.keyMap.Select):
 			return p.selectCurrentOption()
 		case key.Matches(msg, p.keyMap.Allow):
 			return p.respond(PermissionAllow)
 		case key.Matches(msg, p.keyMap.AllowSession):
-			return p.respond(PermissionAllowForSession)
+			return p.allowSession()
+		case key.Matches(msg, p.keyMap.AllowSessionArgs):
+			if p.hasScopeTiers() {
+				return p.respondSession(permission.ScopeSubject(permission.ScopeArgs, p.permission.SubjectFull))
+			}
+			return nil
 		case key.Matches(msg, p.keyMap.Deny):
 			return p.respond(PermissionDeny)
 		case key.Matches(msg, p.keyMap.ToggleDiffMode):
@@ -302,13 +312,49 @@ func (p *Permissions) HandleMsg(msg tea.Msg) Action {
 }
 
 func (p *Permissions) selectCurrentOption() tea.Msg {
-	switch p.selectedOption {
-	case 0:
+	switch {
+	case p.selectedOption == 0:
 		return p.respond(PermissionAllow)
-	case 1:
-		return p.respond(PermissionAllowForSession)
+	case p.selectedOption == 1:
+		return p.allowSession()
+	case p.selectedOption == 2 && p.hasScopeTiers():
+		return p.respondSession(permission.ScopeSubject(permission.ScopeArgs, p.permission.SubjectFull))
 	default:
 		return p.respond(PermissionDeny)
+	}
+}
+
+// hasScopeTiers reports whether the request exposes the separate Cmd and
+// Cmd+Args session grants: bash calls with two distinct scope strings.
+func (p *Permissions) hasScopeTiers() bool {
+	return p.permission.ToolName == tools.BashToolName &&
+		p.permission.Subject != "" &&
+		p.permission.SubjectFull != "" &&
+		p.permission.SubjectFull != p.permission.Subject
+}
+
+func (p *Permissions) numOptions() int {
+	if p.hasScopeTiers() {
+		return 4
+	}
+	return 3
+}
+
+// allowSession grants the session permission at the appropriate tier: the
+// cmd tier (prefixed) for scoped bash calls, legacy verbatim otherwise.
+func (p *Permissions) allowSession() tea.Msg {
+	if p.permission.ToolName == tools.BashToolName && p.permission.Subject != "" {
+		return p.respondSession(permission.ScopeSubject(permission.ScopeCmd, p.permission.Subject))
+	}
+	return p.respond(PermissionAllowForSession)
+}
+
+func (p *Permissions) respondSession(subject string) tea.Msg {
+	perm := p.permission
+	perm.Subject = subject
+	return ActionPermissionResponse{
+		Permission: perm,
+		Action:     PermissionAllowForSession,
 	}
 }
 
@@ -456,12 +502,14 @@ func (p *Permissions) renderHeader(contentWidth int) string {
 
 	lines := []string{title, "", toolLine}
 
-	// Scope remembered by the session grant, shown directly under the tool
-	// name so the breadth of the grant is the first thing the user reads.
-	// Binary-only for now; the Cmd+Args tier is specced in
-	// separate-cmd-args-feature.md.
+	// Scope tiers offered by the session grant buttons, shown directly under
+	// the tool name so the breadth of each choice is the first thing read.
 	if p.permission.Subject != "" {
 		lines = append(lines, p.renderKeyValue("Cmd", p.permission.Subject, contentWidth))
+	}
+	if p.hasScopeTiers() {
+		args := strings.TrimPrefix(p.permission.SubjectFull, p.permission.Subject+" ")
+		lines = append(lines, p.renderKeyValue("Args", args, contentWidth))
 	}
 
 	// Show generic Path only for tools that don't render their own file/path line.
@@ -770,14 +818,18 @@ func (p *Permissions) renderContentPanel(content string, width int) string {
 
 func (p *Permissions) renderButtons(contentWidth int, fullscreen bool) string {
 	sessionLabel := "Allow for Session"
-	if p.permission.ToolName == tools.BashToolName && p.permission.Subject != "" {
+	if p.permission.Subject != "" {
 		sessionLabel = "Allow Cmd for Session"
 	}
 	buttons := []common.ButtonOpts{
 		{Text: "Allow", UnderlineIndex: 0, Selected: p.selectedOption == 0},
 		{Text: sessionLabel, UnderlineIndex: strings.Index(sessionLabel, "Session"), Selected: p.selectedOption == 1},
-		{Text: "Deny", UnderlineIndex: 0, Selected: p.selectedOption == 2},
 	}
+	if p.hasScopeTiers() {
+		argsLabel := "Allow Cmd+Args for Session"
+		buttons = append(buttons, common.ButtonOpts{Text: argsLabel, UnderlineIndex: strings.Index(argsLabel, "Session"), Selected: p.selectedOption == 2})
+	}
+	buttons = append(buttons, common.ButtonOpts{Text: "Deny", UnderlineIndex: 0, Selected: p.selectedOption == p.numOptions()-1})
 
 	content := common.ButtonGroup(p.com.Styles, buttons, "  ")
 

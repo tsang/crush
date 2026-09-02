@@ -14,6 +14,7 @@ type CreatePermissionRequest struct {
 	Params      any    `json:"params"`
 	Path        string `json:"path"`
 	Subject     string `json:"subject"`
+	SubjectFull string `json:"subject_full,omitempty"`
 }
 
 // PermissionNotification represents a notification about a permission change.
@@ -34,6 +35,7 @@ type PermissionRequest struct {
 	Params      any    `json:"params"`
 	Path        string `json:"path"`
 	Subject     string `json:"subject"`
+	SubjectFull string `json:"subject_full,omitempty"`
 }
 
 // UnmarshalJSON implements the json.Unmarshaler interface. This is needed
