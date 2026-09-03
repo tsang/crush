@@ -4487,8 +4487,13 @@ func scopedGrantEntries(cfg *config.Config) []string {
 
 // persistScopedGrant appends a session-approved scoped grant to the
 // workspace config's allowed_tools so the same approval pre-approves the
-// next sessions instead of dying with this one. Only tiered subjects are
-// persisted; a subjectless session grant would replay as blanket approval.
+// next sessions instead of dying with this one. Cmd-tier grants flatten to
+// one entry per binary, so approving "cd && git && swift" stores cd, git,
+// and swift separately and any later combination of already-approved
+// binaries runs without a prompt. Binaries covered by an existing cmd
+// entry are skipped so overlapping approvals don't grow the config. Only
+// tiered subjects are persisted; a subjectless session grant would replay
+// as blanket approval.
 func (m *UI) persistScopedGrant(perm permission.PermissionRequest) {
 	if perm.Subject == "" {
 		return
@@ -4501,10 +4506,16 @@ func (m *UI) persistScopedGrant(perm permission.PermissionRequest) {
 	if cfg := m.com.Config(); cfg != nil && cfg.Permissions != nil {
 		current = cfg.Permissions.AllowedTools
 	}
-	if slices.Contains(current, entry) {
+	updated := slices.Clone(current)
+	for _, flat := range permission.FlattenScopedEntry(entry) {
+		if slices.Contains(current, flat) || permission.CmdBinaryAllowed(current, flat) {
+			continue
+		}
+		updated = append(updated, flat)
+	}
+	if slices.Equal(updated, current) {
 		return
 	}
-	updated := append(slices.Clone(current), entry)
 	if err := m.com.Workspace.SetConfigField(config.ScopeWorkspace, "permissions.allowed_tools", updated); err != nil {
 		slog.Warn("Failed to persist command grant", "error", err, "entry", entry)
 	}
@@ -4512,22 +4523,34 @@ func (m *UI) persistScopedGrant(perm permission.PermissionRequest) {
 
 // applyScopedGrants writes the review dialog's kept list back to the
 // workspace config, revoking unchecked grants from the next request onward.
-// Unscoped tool allowances ride along untouched; an unchanged list is not
-// rewritten, so a startup that just hits enter leaves the file alone.
+// Scoped entries are rewritten from the kept rows, so legacy joined cmd
+// entries flatten to one binary per entry while unscoped tool allowances
+// ride along untouched. An unchanged list is not rewritten, so a startup
+// that just hits enter leaves the file alone.
 func (m *UI) applyScopedGrants(kept []string) {
 	var current []string
 	if cfg := m.com.Config(); cfg != nil && cfg.Permissions != nil {
 		current = cfg.Permissions.AllowedTools
 	}
 	updated := make([]string, 0, len(current))
+	seen := make(map[string]bool, len(current))
+	add := func(entry string) {
+		if seen[entry] {
+			return
+		}
+		seen[entry] = true
+		updated = append(updated, entry)
+	}
 	for _, e := range current {
 		if _, _, ok := permission.CutScopedEntry(e); ok {
-			if slices.Contains(kept, e) {
-				updated = append(updated, e)
+			for _, flat := range permission.FlattenScopedEntry(e) {
+				if slices.Contains(kept, flat) {
+					add(flat)
+				}
 			}
 			continue
 		}
-		updated = append(updated, e)
+		add(e)
 	}
 	if slices.Equal(updated, current) {
 		return

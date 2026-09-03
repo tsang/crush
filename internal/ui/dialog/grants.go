@@ -22,15 +22,17 @@ const GrantsReviewID = "grants_review"
 // caller persists the workspace config so unchecked entries stop
 // pre-approving from the next request onward.
 type ActionSaveGrants struct {
-	// Kept holds the raw entries (e.g. "bash:cmd:mkdir,touch") that
-	// remain allowed, in their original order.
+	// Kept holds the raw entries (e.g. "bash:cmd:mkdir") that remain
+	// allowed, in display order, flattened to one command per cmd-tier
+	// entry.
 	Kept []string
 }
 
-// grantRow is one parsed entry in the review list.
+// grantRow is one parsed entry in the review list. Cmd rows carry a single
+// binary; args rows carry one verbatim cmd+args shape.
 type grantRow struct {
-	raw   string // e.g. "bash:cmd:mkdir,touch"
-	label string // e.g. "bash cmd  mkdir, touch"
+	raw   string // e.g. "bash:cmd:mkdir"
+	label string // e.g. "bash cmd  mkdir"
 	keep  bool
 }
 
@@ -50,29 +52,38 @@ var _ Dialog = (*GrantsReview)(nil)
 // NewGrantsReview builds the review dialog from raw allowed_tools entries.
 // Entries that are not scoped grants (plain "bash", "view", ...) are
 // filtered out: they are config-level tool allowances, not reviewed here.
+// Joined cmd entries are flattened to one row per binary, so every command
+// can be kept or revoked on its own, and duplicates collapse.
 func NewGrantsReview(com *common.Common, entries []string) *GrantsReview {
 	g := &GrantsReview{com: com}
 	h := help.New()
 	h.Styles = com.Styles.DialogHelpStyles()
 	g.help = h
+	seen := make(map[string]bool, len(entries))
 	for _, e := range entries {
-		tool, subject, ok := permission.CutScopedEntry(e)
-		if !ok {
-			continue
+		for _, flat := range permission.FlattenScopedEntry(e) {
+			if seen[flat] {
+				continue
+			}
+			tool, subject, ok := permission.CutScopedEntry(flat)
+			if !ok {
+				continue
+			}
+			seen[flat] = true
+			tier := "cmd"
+			scope := subject
+			if rest, isArgs := strings.CutPrefix(subject, permission.ScopeArgs); isArgs {
+				tier = "args"
+				scope = rest
+			} else if rest, isCmd := strings.CutPrefix(subject, permission.ScopeCmd); isCmd {
+				scope = rest
+			}
+			g.rows = append(g.rows, grantRow{
+				raw:   flat,
+				label: fmt.Sprintf("%s %s  %s", tool, tier, scope),
+				keep:  true,
+			})
 		}
-		tier := "cmd"
-		scope := subject
-		if rest, isArgs := strings.CutPrefix(subject, permission.ScopeArgs); isArgs {
-			tier = "args"
-			scope = rest
-		} else if rest, isCmd := strings.CutPrefix(subject, permission.ScopeCmd); isCmd {
-			scope = rest
-		}
-		g.rows = append(g.rows, grantRow{
-			raw:   e,
-			label: fmt.Sprintf("%s %s  %s", tool, tier, strings.ReplaceAll(scope, permission.SubjectSeparator, ", ")),
-			keep:  true,
-		})
 	}
 	g.keyMap.Up = key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "move"))
 	g.keyMap.Down = key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "move"))

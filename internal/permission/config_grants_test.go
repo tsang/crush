@@ -56,6 +56,61 @@ func TestConfigScopedGrantCovers(t *testing.T) {
 	}
 }
 
+// TestConfigScopedGrantCmdUnionAcrossEntries pins the flattened storage
+// semantics: cmd binaries pool across every cmd entry, so a chain of
+// individually approved commands runs silently while a chain containing a
+// never-approved binary still prompts.
+func TestConfigScopedGrantCmdUnionAcrossEntries(t *testing.T) {
+	t.Parallel()
+
+	svc := NewPermissionService("/tmp", false, []string{
+		"bash",
+		"bash:cmd:cd",
+		"bash:cmd:git",
+		"bash:cmd:swift",
+	}).(*permissionService)
+
+	covered := []PermissionRequest{
+		{ToolName: "bash", Action: "execute", Path: "/tmp", Subject: "cd,git,swift"},
+		{ToolName: "bash", Action: "execute", Path: "/tmp", Subject: "cd,swift"},
+		{ToolName: "bash", Action: "execute", Path: "/tmp", Subject: "swift"},
+	}
+	for _, req := range covered {
+		assert.Truef(t, svc.grantCovers(req), "separate grants should combine to cover %q", req.Subject)
+	}
+
+	notCovered := []PermissionRequest{
+		{ToolName: "bash", Action: "execute", Path: "/tmp", Subject: "git,rm"},
+		{ToolName: "bash", Action: "execute", Path: "/tmp", Subject: "rm"},
+	}
+	for _, req := range notCovered {
+		assert.Falsef(t, svc.grantCovers(req), "%q must still prompt", req.Subject)
+	}
+}
+
+func TestFlattenScopedEntry(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, []string{"bash:cmd:cd", "bash:cmd:git", "bash:cmd:swift"},
+		FlattenScopedEntry("bash:cmd:cd,git,swift"))
+	assert.Equal(t, []string{"bash:cmd:git"}, FlattenScopedEntry("bash:cmd:git"))
+	assert.Equal(t, []string{"bash:args:swift build"}, FlattenScopedEntry("bash:args:swift build"),
+		"args entries are verbatim shapes and stay whole")
+	assert.Equal(t, []string{"bash"}, FlattenScopedEntry("bash"))
+	assert.Equal(t, []string{"bash:execute"}, FlattenScopedEntry("bash:execute"))
+}
+
+func TestCmdBinaryAllowed(t *testing.T) {
+	t.Parallel()
+
+	entries := []string{"bash:cmd:cd,git", "bash:args:swift build"}
+	assert.True(t, CmdBinaryAllowed(entries, "bash:cmd:cd"), "joined entry covers its binaries")
+	assert.True(t, CmdBinaryAllowed(entries, "bash:cmd:git"))
+	assert.False(t, CmdBinaryAllowed(entries, "bash:cmd:swift"), "unapproved binary stays unauthorized")
+	assert.False(t, CmdBinaryAllowed(entries, "bash:args:swift build"), "args entries never count as cmd coverage")
+	assert.False(t, CmdBinaryAllowed(entries, "bash"), "unscoped entries never count as cmd coverage")
+}
+
 // TestAllowedToolsSourceLiveUpdate proves config-scoped grants take effect
 // the moment the config changes, with no restart: the source closure is the
 // live view, re-read on every lookup.

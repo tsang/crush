@@ -236,11 +236,6 @@ func SplitSubject(subject string) []string {
 // scope string.
 func ScopeSubject(prefix, subject string) string { return prefix + subject }
 
-// grantCovers reports whether any stored session grant covers the incoming
-// request. The legacy raw subject and the args tier are matched verbatim.
-// The cmd tier is all-or-nothing over the request's binaries: every one must
-// carry its own grant, so a chain containing a binary that was never approved
-// still prompts.
 // CutScopedEntry splits a scoped allow-list entry such as
 // "bash:cmd:mkdir,touch" into its tool ("bash") and tier subject
 // ("cmd:mkdir,touch"). Entries without a scope tier ("bash",
@@ -258,33 +253,74 @@ func CutScopedEntry(entry string) (tool, subject string, ok bool) {
 	return "", "", false
 }
 
-// configScopedGrantCovers reports whether a scoped allowed_tools entry from
-// config pre-approves the request. The workspace config file is the scope:
-// a cmd entry covers any invocation whose binaries all appear in it, and
-// an args entry matches the cmd+args shapes verbatim, exactly like the
+// FlattenScopedEntry splits a cmd-tier allow-list entry into one entry per
+// binary, so a stored chain grant ("bash:cmd:cd,git") becomes flat entries
+// ("bash:cmd:cd", "bash:cmd:git") that persist and review one command at a
+// time. Args-tier entries are verbatim cmd+args shapes and stay whole;
+// unscoped entries pass through unchanged.
+func FlattenScopedEntry(entry string) []string {
+	tool, subject, ok := CutScopedEntry(entry)
+	if !ok {
+		return []string{entry}
+	}
+	rest, isCmd := strings.CutPrefix(subject, ScopeCmd)
+	if !isCmd {
+		return []string{entry}
+	}
+	tokens := SplitSubject(rest)
+	flat := make([]string, 0, len(tokens))
+	for _, bin := range tokens {
+		flat = append(flat, tool+":"+ScopeSubject(ScopeCmd, bin))
+	}
+	return flat
+}
+
+// CmdBinaryAllowed reports whether the binary named by a flat cmd-tier entry
+// ("bash:cmd:git") is already covered by any cmd-tier entry in entries,
+// joined or flat alike. Overlapping approvals use this so a re-approval of
+// an already-allowed command does not grow the config.
+func CmdBinaryAllowed(entries []string, entry string) bool {
+	tool, subject, ok := CutScopedEntry(entry)
+	if !ok {
+		return false
+	}
+	bin, isCmd := strings.CutPrefix(subject, ScopeCmd)
+	if !isCmd || !ValidToken(bin) {
+		return false
+	}
+	for _, e := range entries {
+		eTool, eSubject, ok := CutScopedEntry(e)
+		if !ok || eTool != tool {
+			continue
+		}
+		rest, isCmd := strings.CutPrefix(eSubject, ScopeCmd)
+		if !isCmd {
+			continue
+		}
+		if slices.Contains(SplitSubject(rest), bin) {
+			return true
+		}
+	}
+	return false
+}
+
+// configScopedGrantCovers reports whether scoped allowed_tools entries from
+// config pre-approve the request. Cmd-tier binaries pool across every cmd
+// entry: once each binary of the request appears in some approved entry the
+// chain runs silently, so a combination of individually approved commands
+// does not re-prompt. A binary that was never approved still prompts.
+// Args-tier entries match the cmd+args shape verbatim, exactly like the
 // in-session tiers. Config grants therefore survive restarts while the
 // unknown-subject fail-closed rule still applies upstream.
 func (s *permissionService) configScopedGrantCovers(permission PermissionRequest) bool {
+	var allowedBins []string
 	for _, entry := range s.scopedAllowedEntries() {
 		tool, subject, ok := CutScopedEntry(entry)
 		if !ok || tool != permission.ToolName {
 			continue
 		}
 		if rest, isCmd := strings.CutPrefix(subject, ScopeCmd); isCmd {
-			allowed := SplitSubject(rest)
-			if len(allowed) == 0 {
-				continue
-			}
-			all := true
-			for _, bin := range SplitSubject(permission.Subject) {
-				if !slices.Contains(allowed, bin) {
-					all = false
-					break
-				}
-			}
-			if all {
-				return true
-			}
+			allowedBins = append(allowedBins, SplitSubject(rest)...)
 			continue
 		}
 		if _, isArgs := strings.CutPrefix(subject, ScopeArgs); isArgs {
@@ -293,7 +329,16 @@ func (s *permissionService) configScopedGrantCovers(permission PermissionRequest
 			}
 		}
 	}
-	return false
+	bins := SplitSubject(permission.Subject)
+	if len(bins) == 0 || len(allowedBins) == 0 {
+		return false
+	}
+	for _, bin := range bins {
+		if !slices.Contains(allowedBins, bin) {
+			return false
+		}
+	}
+	return true
 }
 
 // scopedAllowedEntries returns the scoped entries from both the startup
@@ -305,6 +350,11 @@ func (s *permissionService) scopedAllowedEntries() []string {
 	return append(slices.Clone(s.allowedTools), s.allowedToolsSource()...)
 }
 
+// grantCovers reports whether any stored grant covers the incoming request.
+// The legacy raw subject and the args tier are matched verbatim. The cmd
+// tier is per-binary: every one must carry its own grant, in-session or in
+// config, so a chain containing a binary that was never approved still
+// prompts.
 func (s *permissionService) grantCovers(permission PermissionRequest) bool {
 	if permission.Subject == ScopeUnknown {
 		return false

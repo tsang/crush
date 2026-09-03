@@ -23,13 +23,30 @@ func newTestGrantsReview(t *testing.T) *GrantsReview {
 func TestGrantsReviewFiltersUnscoped(t *testing.T) {
 	t.Parallel()
 	g := newTestGrantsReview(t)
-	require.Len(t, g.rows, 2, "unscoped entries are config-level, not reviewed here")
+	require.Len(t, g.rows, 3, "unscoped entries are config-level and joined cmd entries flatten to one row per binary")
 	require.True(t, g.HasRows())
-	require.Equal(t, "bash cmd  mkdir, touch", g.rows[0].label)
-	require.Equal(t, "bash args  swift build", g.rows[1].label)
+	require.Equal(t, "bash cmd  mkdir", g.rows[0].label)
+	require.Equal(t, "bash:cmd:mkdir", g.rows[0].raw)
+	require.Equal(t, "bash cmd  touch", g.rows[1].label)
+	require.Equal(t, "bash:cmd:touch", g.rows[1].raw)
+	require.Equal(t, "bash args  swift build", g.rows[2].label)
+	require.Equal(t, "bash:args:swift build", g.rows[2].raw)
 	for _, row := range g.rows {
 		require.True(t, row.keep, "everything starts checked")
 	}
+}
+
+func TestGrantsReviewDedupesFlattenedRows(t *testing.T) {
+	t.Parallel()
+	s := styles.CharmtonePantera()
+	com := &common.Common{Styles: &s}
+	g := NewGrantsReview(com, []string{
+		"bash:cmd:mkdir,touch",
+		"bash:cmd:touch",
+	})
+	require.Len(t, g.rows, 2, "a binary granted twice is reviewed once")
+	require.Equal(t, "bash:cmd:mkdir", g.rows[0].raw)
+	require.Equal(t, "bash:cmd:touch", g.rows[1].raw)
 }
 
 func TestGrantsReviewToggleAndApply(t *testing.T) {
@@ -42,7 +59,8 @@ func TestGrantsReviewToggleAndApply(t *testing.T) {
 
 	saved, ok := action.(ActionSaveGrants)
 	require.True(t, ok)
-	require.Equal(t, []string{"bash:cmd:mkdir,touch"}, saved.Kept)
+	require.Equal(t, []string{"bash:cmd:mkdir", "bash:args:swift build"}, saved.Kept,
+		"unchecking touch revokes only that binary")
 }
 
 func TestGrantsReviewDigitToggles(t *testing.T) {
@@ -52,7 +70,8 @@ func TestGrantsReviewDigitToggles(t *testing.T) {
 	action := g.HandleMsg(tea.KeyPressMsg{Code: tea.KeyEnter})
 	saved, ok := action.(ActionSaveGrants)
 	require.True(t, ok)
-	require.Equal(t, []string{"bash:cmd:mkdir,touch"}, saved.Kept)
+	require.Equal(t, []string{"bash:cmd:mkdir", "bash:args:swift build"}, saved.Kept,
+		"digit 2 unchecks only the touch row")
 }
 
 func TestGrantsReviewCloseKeepsAll(t *testing.T) {
@@ -63,7 +82,7 @@ func TestGrantsReviewCloseKeepsAll(t *testing.T) {
 	action := g.HandleMsg(tea.KeyPressMsg{Code: tea.KeyEscape})
 	saved, ok := action.(ActionSaveGrants)
 	require.True(t, ok)
-	require.Equal(t, []string{"bash:cmd:mkdir,touch", "bash:args:swift build"}, saved.Kept,
+	require.Equal(t, []string{"bash:cmd:mkdir", "bash:cmd:touch", "bash:args:swift build"}, saved.Kept,
 		"closing without deliberate changes must keep every grant")
 }
 
