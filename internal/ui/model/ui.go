@@ -328,6 +328,10 @@ type UI struct {
 	// by user toggle or auto-switch based on window size)
 	isCompact bool
 
+	// grantsReviewChecked gates the startup review of persisted command
+	// grants so the dialog opens once per run.
+	grantsReviewChecked bool
+
 	// detailsOpen tracks whether the details panel is open (in compact mode)
 	detailsOpen bool
 
@@ -758,6 +762,12 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.isCompact = true
 		}
 		m.setState(uiChat, m.focus)
+		if !m.grantsReviewChecked {
+			m.grantsReviewChecked = true
+			if dlg := dialog.NewGrantsReview(m.com, scopedGrantEntries(m.com.Config())); dlg.HasRows() {
+				m.dialog.OpenDialog(dlg)
+			}
+		}
 		m.session = msg.session
 		m.sidebarOffset = 0
 		m.sessionFiles = msg.files
@@ -2081,10 +2091,16 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		case dialog.PermissionAllow:
 			m.com.Workspace.PermissionGrant(msg.Permission)
 		case dialog.PermissionAllowForSession:
-			m.com.Workspace.PermissionGrantPersistent(msg.Permission)
+			if m.com.Workspace.PermissionGrantPersistent(msg.Permission) {
+				m.persistScopedGrant(msg.Permission)
+			}
 		case dialog.PermissionDeny:
 			m.com.Workspace.PermissionDeny(msg.Permission)
 		}
+
+	case dialog.ActionSaveGrants:
+		m.dialog.CloseDialog(dialog.GrantsReviewID)
+		m.applyScopedGrants(msg.Kept)
 
 	case dialog.ActionFilePickerSelected:
 		cmds = append(cmds, tea.Sequence(
@@ -4452,6 +4468,73 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		break
 	}
 	return tea.Batch(cmds...)
+}
+
+// scopedGrantEntries filters config allowed_tools entries down to scoped
+// grants (bash:cmd:…, bash:args:…), the ones the review dialog manages.
+func scopedGrantEntries(cfg *config.Config) []string {
+	if cfg == nil || cfg.Permissions == nil {
+		return nil
+	}
+	var out []string
+	for _, e := range cfg.Permissions.AllowedTools {
+		if _, _, ok := permission.CutScopedEntry(e); ok {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// persistScopedGrant appends a session-approved scoped grant to the
+// workspace config's allowed_tools so the same approval pre-approves the
+// next sessions instead of dying with this one. Only tiered subjects are
+// persisted; a subjectless session grant would replay as blanket approval.
+func (m *UI) persistScopedGrant(perm permission.PermissionRequest) {
+	if perm.Subject == "" {
+		return
+	}
+	entry := perm.ToolName + ":" + perm.Subject
+	if _, _, ok := permission.CutScopedEntry(entry); !ok {
+		return
+	}
+	var current []string
+	if cfg := m.com.Config(); cfg != nil && cfg.Permissions != nil {
+		current = cfg.Permissions.AllowedTools
+	}
+	if slices.Contains(current, entry) {
+		return
+	}
+	updated := append(slices.Clone(current), entry)
+	if err := m.com.Workspace.SetConfigField(config.ScopeWorkspace, "permissions.allowed_tools", updated); err != nil {
+		slog.Warn("Failed to persist command grant", "error", err, "entry", entry)
+	}
+}
+
+// applyScopedGrants writes the review dialog's kept list back to the
+// workspace config, revoking unchecked grants from the next request onward.
+// Unscoped tool allowances ride along untouched; an unchanged list is not
+// rewritten, so a startup that just hits enter leaves the file alone.
+func (m *UI) applyScopedGrants(kept []string) {
+	var current []string
+	if cfg := m.com.Config(); cfg != nil && cfg.Permissions != nil {
+		current = cfg.Permissions.AllowedTools
+	}
+	updated := make([]string, 0, len(current))
+	for _, e := range current {
+		if _, _, ok := permission.CutScopedEntry(e); ok {
+			if slices.Contains(kept, e) {
+				updated = append(updated, e)
+			}
+			continue
+		}
+		updated = append(updated, e)
+	}
+	if slices.Equal(updated, current) {
+		return
+	}
+	if err := m.com.Workspace.SetConfigField(config.ScopeWorkspace, "permissions.allowed_tools", updated); err != nil {
+		slog.Warn("Failed to save command grants", "error", err)
+	}
 }
 
 // openQuitDialog opens the quit confirmation dialog.

@@ -121,6 +121,10 @@ type permissionService struct {
 	autoApproveSessionsMu sync.RWMutex
 	skip                  atomic.Bool
 	allowedTools          []string
+	// allowedToolsSource, when set, re-reads the allowed_tools list from
+	// live config so grants persisted to the workspace config file take
+	// effect without a restart.
+	allowedToolsSource func() []string
 
 	// used to make sure we only process one request at a time
 	requestMu       sync.Mutex
@@ -237,9 +241,76 @@ func ScopeSubject(prefix, subject string) string { return prefix + subject }
 // The cmd tier is all-or-nothing over the request's binaries: every one must
 // carry its own grant, so a chain containing a binary that was never approved
 // still prompts.
+// CutScopedEntry splits a scoped allow-list entry such as
+// "bash:cmd:mkdir,touch" into its tool ("bash") and tier subject
+// ("cmd:mkdir,touch"). Entries without a scope tier ("bash",
+// "bash:execute") are not grants and stay in the tool-level early check.
+func CutScopedEntry(entry string) (tool, subject string, ok bool) {
+	tool, rest, ok := strings.Cut(entry, ":")
+	if !ok || tool == "" {
+		return "", "", false
+	}
+	for _, prefix := range []string{ScopeCmd, ScopeArgs} {
+		if strings.HasPrefix(rest, prefix) && len(rest) > len(prefix) {
+			return tool, rest, true
+		}
+	}
+	return "", "", false
+}
+
+// configScopedGrantCovers reports whether a scoped allowed_tools entry from
+// config pre-approves the request. The workspace config file is the scope:
+// a cmd entry covers any invocation whose binaries all appear in it, and
+// an args entry matches the cmd+args shapes verbatim, exactly like the
+// in-session tiers. Config grants therefore survive restarts while the
+// unknown-subject fail-closed rule still applies upstream.
+func (s *permissionService) configScopedGrantCovers(permission PermissionRequest) bool {
+	for _, entry := range s.scopedAllowedEntries() {
+		tool, subject, ok := CutScopedEntry(entry)
+		if !ok || tool != permission.ToolName {
+			continue
+		}
+		if rest, isCmd := strings.CutPrefix(subject, ScopeCmd); isCmd {
+			allowed := SplitSubject(rest)
+			if len(allowed) == 0 {
+				continue
+			}
+			all := true
+			for _, bin := range SplitSubject(permission.Subject) {
+				if !slices.Contains(allowed, bin) {
+					all = false
+					break
+				}
+			}
+			if all {
+				return true
+			}
+			continue
+		}
+		if _, isArgs := strings.CutPrefix(subject, ScopeArgs); isArgs {
+			if permission.SubjectFull != "" && subject == ScopeSubject(ScopeArgs, permission.SubjectFull) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// scopedAllowedEntries returns the scoped entries from both the startup
+// snapshot and, when wired, the live config source.
+func (s *permissionService) scopedAllowedEntries() []string {
+	if s.allowedToolsSource == nil {
+		return s.allowedTools
+	}
+	return append(slices.Clone(s.allowedTools), s.allowedToolsSource()...)
+}
+
 func (s *permissionService) grantCovers(permission PermissionRequest) bool {
 	if permission.Subject == ScopeUnknown {
 		return false
+	}
+	if s.configScopedGrantCovers(permission) {
+		return true
 	}
 	key := PermissionKey{
 		SessionID: permission.SessionID,
@@ -431,7 +502,7 @@ func (s *permissionService) SkipRequests() bool {
 	return s.skip.Load()
 }
 
-func NewPermissionService(workingDir string, skip bool, allowedTools []string) Service {
+func NewPermissionService(workingDir string, skip bool, allowedTools []string, opts ...Option) Service {
 	svc := &permissionService{
 		Broker:              pubsub.NewBroker[PermissionRequest](),
 		notificationBroker:  pubsub.NewBroker[PermissionNotification](),
@@ -441,6 +512,21 @@ func NewPermissionService(workingDir string, skip bool, allowedTools []string) S
 		allowedTools:        allowedTools,
 		pendingRequests:     csync.NewMap[string, chan bool](),
 	}
+	for _, opt := range opts {
+		opt(svc)
+	}
 	svc.skip.Store(skip)
 	return svc
+}
+
+// Option customizes a permission service at construction.
+type Option func(*permissionService)
+
+// WithAllowedToolsSource wires a live view of the config allow-list into
+// the service. Scoped entries (see CutScopedEntry) persisted to the
+// workspace config are re-checked on every permission lookup, so grants
+// approved in a previous session — and edits made while running — apply
+// immediately without a restart.
+func WithAllowedToolsSource(fn func() []string) Option {
+	return func(s *permissionService) { s.allowedToolsSource = fn }
 }

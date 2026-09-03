@@ -1,0 +1,186 @@
+package dialog
+
+import (
+	"fmt"
+	"strings"
+
+	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/ui/common"
+	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
+)
+
+// GrantsReviewID is the identifier for the saved command grants review
+// dialog.
+const GrantsReviewID = "grants_review"
+
+// ActionSaveGrants reports the scoped grant entries the user kept. The
+// caller persists the workspace config so unchecked entries stop
+// pre-approving from the next request onward.
+type ActionSaveGrants struct {
+	// Kept holds the raw entries (e.g. "bash:cmd:mkdir,touch") that
+	// remain allowed, in their original order.
+	Kept []string
+}
+
+// grantRow is one parsed entry in the review list.
+type grantRow struct {
+	raw   string // e.g. "bash:cmd:mkdir,touch"
+	label string // e.g. "bash cmd  mkdir, touch"
+	keep  bool
+}
+
+// GrantsReview lists the scoped allowed_tools entries loaded from config at
+// startup. Everything starts checked; the user unchecks grants they do not
+// want active this session.
+type GrantsReview struct {
+	com    *common.Common
+	help   help.Model
+	rows   []grantRow
+	cursor int
+	keyMap struct{ Up, Down, Toggle, Done, Close key.Binding }
+}
+
+var _ Dialog = (*GrantsReview)(nil)
+
+// NewGrantsReview builds the review dialog from raw allowed_tools entries.
+// Entries that are not scoped grants (plain "bash", "view", ...) are
+// filtered out: they are config-level tool allowances, not reviewed here.
+func NewGrantsReview(com *common.Common, entries []string) *GrantsReview {
+	g := &GrantsReview{com: com}
+	h := help.New()
+	h.Styles = com.Styles.DialogHelpStyles()
+	g.help = h
+	for _, e := range entries {
+		tool, subject, ok := permission.CutScopedEntry(e)
+		if !ok {
+			continue
+		}
+		tier := "cmd"
+		scope := subject
+		if rest, isArgs := strings.CutPrefix(subject, permission.ScopeArgs); isArgs {
+			tier = "args"
+			scope = rest
+		} else if rest, isCmd := strings.CutPrefix(subject, permission.ScopeCmd); isCmd {
+			scope = rest
+		}
+		g.rows = append(g.rows, grantRow{
+			raw:   e,
+			label: fmt.Sprintf("%s %s  %s", tool, tier, strings.ReplaceAll(scope, permission.SubjectSeparator, ", ")),
+			keep:  true,
+		})
+	}
+	g.keyMap.Up = key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "move"))
+	g.keyMap.Down = key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "move"))
+	g.keyMap.Toggle = key.NewBinding(key.WithKeys(" ", "space"), key.WithHelp("space", "toggle"))
+	g.keyMap.Done = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "apply"))
+	g.keyMap.Close = CloseKey
+	return g
+}
+
+// HasRows reports whether there is anything to review.
+func (g *GrantsReview) HasRows() bool {
+	return len(g.rows) > 0
+}
+
+// ID implements [Dialog].
+func (*GrantsReview) ID() string {
+	return GrantsReviewID
+}
+
+// HandleMsg implements [Dialog].
+func (g *GrantsReview) HandleMsg(msg tea.Msg) Action {
+	if len(g.rows) == 0 {
+		return ActionClose{}
+	}
+	keyMsg, ok := msg.(tea.KeyPressMsg)
+	if !ok {
+		return nil
+	}
+	switch {
+	case key.Matches(keyMsg, g.keyMap.Close):
+		// Closing keeps everything: nothing was revoked without a
+		// deliberate uncheck.
+		return ActionSaveGrants{Kept: g.kept()}
+	case key.Matches(keyMsg, g.keyMap.Up):
+		g.cursor = (g.cursor - 1 + len(g.rows)) % len(g.rows)
+	case key.Matches(keyMsg, g.keyMap.Down):
+		g.cursor = (g.cursor + 1) % len(g.rows)
+	case key.Matches(keyMsg, g.keyMap.Toggle):
+		g.rows[g.cursor].keep = !g.rows[g.cursor].keep
+	case key.Matches(keyMsg, g.keyMap.Done):
+		return ActionSaveGrants{Kept: g.kept()}
+	default:
+		if idx := digitIndex(keyMsg.String()); idx >= 0 && idx < len(g.rows) {
+			g.cursor = idx
+			g.rows[idx].keep = !g.rows[idx].keep
+		}
+	}
+	return nil
+}
+
+func (g *GrantsReview) kept() []string {
+	kept := make([]string, 0, len(g.rows))
+	for _, row := range g.rows {
+		if row.keep {
+			kept = append(kept, row.raw)
+		}
+	}
+	return kept
+}
+
+// digitIndex maps a numeric keypress to a list index, -1 when the key is
+// not a digit.
+func digitIndex(s string) int {
+	if len(s) != 1 || s[0] < '0' || s[0] > '9' {
+		return -1
+	}
+	return int(s[0] - '1')
+}
+
+// Draw implements [Dialog].
+func (g *GrantsReview) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
+	t := g.com.Styles
+	width := min(area.Dx()-4, defaultDialogMaxWidth)
+	dialogStyle := t.Dialog.View.Width(width).Padding(0, 1)
+	contentWidth := width - dialogStyle.GetHorizontalFrameSize()
+
+	title := common.DialogTitle(t, "Saved Command Grants", contentWidth, t.Dialog.TitleGradFromColor, t.Dialog.TitleGradToColor)
+	title = t.Dialog.Title.Render(title)
+
+	lines := []string{
+		title,
+		"",
+		t.Dialog.Permissions.ValueText.Render("Pre-approved from your workspace config. Uncheck to revoke this session."),
+		"",
+	}
+	for i, row := range g.rows {
+		mark := "[ ]"
+		if row.keep {
+			mark = "[x]"
+		}
+		text := fmt.Sprintf("%d %s %s", i+1, mark, row.label)
+		text = ansi.Truncate(text, contentWidth, "…")
+		style := t.Dialog.NormalItem
+		if i == g.cursor {
+			style = t.Dialog.SelectedItem
+		}
+		lines = append(lines, style.Render(text))
+	}
+
+	helpView := shortHelpLine(&g.help, g.ShortHelp(), contentWidth)
+	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
+	content = lipgloss.JoinVertical(lipgloss.Left, content, "", helpView)
+
+	DrawCenter(scr, area, dialogStyle.Render(content))
+	return nil
+}
+
+// ShortHelp implements [help.KeyMap].
+func (g *GrantsReview) ShortHelp() []key.Binding {
+	return []key.Binding{g.keyMap.Up, g.keyMap.Down, g.keyMap.Toggle, g.keyMap.Done, g.keyMap.Close}
+}
