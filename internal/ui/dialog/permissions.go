@@ -3,6 +3,7 @@ package dialog
 import (
 	"encoding/json"
 	"fmt"
+	"image"
 	"strings"
 
 	"charm.land/bubbles/v2/help"
@@ -66,6 +67,18 @@ type Permissions struct {
 	viewport      viewport.Model
 	viewportDirty bool // true when viewport content needs to be re-rendered
 	viewportWidth int
+
+	// Mouse interaction state for the option buttons, cached at draw
+	// time: one hit-test compositor per rendered button row plus the
+	// layout geometry they mirror.
+	buttonHits    []*lipgloss.Compositor
+	buttonRows    [][]common.ButtonOpts
+	buttonOptIdx  [][]int
+	buttonPad     []int
+	buttonSpacing string
+	buttonArea    image.Rectangle
+	hoverX        int
+	hoverY        int
 
 	// Diff view state.
 	diffSplitMode        *bool // nil means use default based on width
@@ -288,6 +301,10 @@ func (p *Permissions) HandleMsg(msg tea.Msg) Action {
 				p.viewport, _ = p.viewport.Update(msg)
 			}
 		}
+	case tea.MouseClickMsg:
+		return p.handleMouseClick(msg)
+	case tea.MouseMotionMsg:
+		p.hoverX, p.hoverY = msg.X, msg.Y
 	case common.CoalescedWheelMsg:
 		if p.hasDiffView() {
 			if msg.DeltaX < 0 {
@@ -312,25 +329,49 @@ func (p *Permissions) HandleMsg(msg tea.Msg) Action {
 }
 
 func (p *Permissions) selectCurrentOption() tea.Msg {
+	return p.respondOption(p.selectedOption)
+}
+
+// respondOption resolves the request at the given option's tier: 0 Allow,
+// 1 session cmd, 2 cmd+args when scope tiers apply, anything else Deny. An
+// unknown scope only ever offers Allow and Deny, so a grant can't be minted
+// from "?". Shared by keyboard confirmation and mouse button clicks.
+func (p *Permissions) respondOption(idx int) tea.Msg {
 	if !p.canGrantSession() {
-		// Only Allow and Deny are offered: there is no readable scope to
-		// remember, so a grant would be minted from "?" and cover the next
-		// unreadable command.
-		if p.selectedOption == 0 {
+		if idx == 0 {
 			return p.respond(PermissionAllow)
 		}
 		return p.respond(PermissionDeny)
 	}
 	switch {
-	case p.selectedOption == 0:
+	case idx == 0:
 		return p.respond(PermissionAllow)
-	case p.selectedOption == 1:
+	case idx == 1:
 		return p.allowSession()
-	case p.selectedOption == 2 && p.hasScopeTiers():
+	case idx == 2 && p.hasScopeTiers():
 		return p.respondSession(permission.ScopeSubject(permission.ScopeArgs, p.permission.SubjectFull))
 	default:
 		return p.respond(PermissionDeny)
 	}
+}
+
+// handleMouseClick fires the option whose button sits under the pointer,
+// mirroring the inline question dialogs where clicking a button commits it.
+func (p *Permissions) handleMouseClick(msg tea.MouseClickMsg) Action {
+	if msg.Button != tea.MouseLeft {
+		return nil
+	}
+	for r, comp := range p.buttonHits {
+		if r >= len(p.buttonOptIdx) {
+			break
+		}
+		idx := common.HitButtonIndex(comp, msg.X, msg.Y)
+		if idx < 0 || idx >= len(p.buttonOptIdx[r]) {
+			continue
+		}
+		return p.respondOption(p.buttonOptIdx[r][idx])
+	}
+	return nil
 }
 
 // canGrantSession reports whether this request can be remembered for the
@@ -511,8 +552,33 @@ func (p *Permissions) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	parts = append(parts, "", buttons, "", helpView)
 
 	innerContent := lipgloss.JoinVertical(lipgloss.Left, parts...)
-	DrawCenterCursor(scr, area, dialogStyle.Render(innerContent), nil)
+	view := dialogStyle.Render(innerContent)
+	vw, vh := lipgloss.Size(view)
+	vw = min(vw, area.Dx())
+	vh = min(vh, area.Dy())
+	rect := common.CenterRect(area, vw, vh)
+	offset := lipgloss.Height(header) + 1
+	if content != "" {
+		offset += 1 + lipgloss.Height(content)
+	}
+	p.layoutButtonHits(rect, dialogStyle, contentWidth, offset)
+	uv.NewStyledString(view).Draw(scr, rect)
 	return nil
+}
+
+// layoutButtonHits anchors one hit-test compositor per cached button row at
+// the rect the dialog was just drawn into, so MouseClickMsg and hover
+// resolve to option indices. offsetBeforeButtons counts the lines sitting
+// above the button block inside the dialog content.
+func (p *Permissions) layoutButtonHits(rect uv.Rectangle, dialogStyle lipgloss.Style, contentWidth, offsetBeforeButtons int) {
+	left := rect.Min.X + dialogStyle.GetHorizontalFrameSize()/2
+	top := rect.Min.Y + dialogStyle.GetVerticalFrameSize()/2 + offsetBeforeButtons
+	p.buttonHits = nil
+	for r, row := range p.buttonRows {
+		x := left + max(0, p.buttonPad[r])
+		p.buttonHits = append(p.buttonHits, common.ButtonHitCompositor(p.com.Styles, row, p.buttonSpacing, x, top+r))
+	}
+	p.buttonArea = image.Rect(left, top, left+contentWidth, top+len(p.buttonRows))
 }
 
 func (p *Permissions) renderHeader(contentWidth int) string {
@@ -883,33 +949,75 @@ func (p *Permissions) renderButtons(contentWidth int, fullscreen bool) string {
 	}
 	buttons = append(buttons, common.ButtonOpts{Text: "Deny", UnderlineIndex: 0, Selected: p.selectedOption == p.numOptions()-1})
 
-	content := common.ButtonGroup(p.com.Styles, buttons, "  ")
-
-	// Center when stacked or when the dialog fills the screen; otherwise
-	// hug the right edge next to the content. Right-aligning across a
+	// Layout: one right-aligned row when everything fits; two rows of two
+	// when four options overflow (keeps Allow/Deny semantics visible
+	// instead of a four-deep single-column tower); a centered stack for
+	// three options or a fullscreen dialog. Right-aligning across a
 	// full-screen width leaves the buttons stranded in the corner.
-	align := lipgloss.Right
-	if fullscreen {
-		align = lipgloss.Center
-	}
-	if lipgloss.Width(content) > contentWidth {
+	spacing := "  "
+	rows := [][]common.ButtonOpts{buttons}
+	if lipgloss.Width(common.ButtonGroup(p.com.Styles, buttons, spacing)) > contentWidth {
 		if len(buttons) == 4 {
-			// Two rows of two: keeps Allow/Deny semantics visible
-			// instead of a four-deep single-column tower.
-			content = strings.Join([]string{
-				common.ButtonGroup(p.com.Styles, buttons[:2], " "),
-				common.ButtonGroup(p.com.Styles, buttons[2:], " "),
-			}, "\n")
+			spacing = " "
+			rows = [][]common.ButtonOpts{buttons[:2], buttons[2:]}
 		} else {
-			content = common.ButtonGroup(p.com.Styles, buttons, "\n")
+			rows = make([][]common.ButtonOpts, len(buttons))
+			for i := range buttons {
+				rows[i] = buttons[i : i+1]
+			}
 		}
-		align = lipgloss.Center
+	}
+	centered := fullscreen || len(rows) > 1
+
+	// Mark hover and stash hit-test geometry from the previous frame —
+	// button positions only move on resize, so this trails by at most one
+	// frame, the same trade the inline question dialogs make.
+	hover := func(row []common.ButtonOpts, r int) []common.ButtonOpts {
+		out := make([]common.ButtonOpts, len(row))
+		copy(out, row)
+		if r < len(p.buttonHits) {
+			if idx := common.HitButtonIndex(p.buttonHits[r], p.hoverX, p.hoverY); idx >= 0 && idx < len(out) {
+				out[idx].Hovered = true
+			}
+		}
+		return out
+	}
+	idx := 0
+	idxRows := make([][]int, len(rows))
+	rendered := make([]string, len(rows))
+	pads := make([]int, len(rows))
+	for r, row := range rows {
+		hoverRow := hover(row, r)
+		opts := make([]string, len(hoverRow))
+		idxRow := make([]int, len(hoverRow))
+		for c := range hoverRow {
+			opts[c] = common.Button(p.com.Styles, hoverRow[c])
+			idxRow[c] = idx
+			idx++
+		}
+		rendered[r] = strings.Join(opts, spacing)
+		idxRows[r] = idxRow
+		// Leading indent the Width+Align block will apply per row, reused
+		// by the hit-test compositors so clicks match what's drawn.
+		pads[r] = max(0, contentWidth-lipgloss.Width(rendered[r]))
+		if centered {
+			pads[r] /= 2
+		}
 	}
 
+	p.buttonRows = rows
+	p.buttonOptIdx = idxRows
+	p.buttonPad = pads
+	p.buttonSpacing = spacing
+
+	align := lipgloss.Right
+	if centered {
+		align = lipgloss.Center
+	}
 	return lipgloss.NewStyle().
 		Width(contentWidth).
 		Align(align).
-		Render(content)
+		Render(strings.Join(rendered, "\n"))
 }
 
 func (p *Permissions) canScroll() bool {

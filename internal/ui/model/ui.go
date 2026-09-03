@@ -4463,6 +4463,10 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		if cmd := m.openQuitDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case dialog.GrantsReviewID:
+		if cmd := m.openGrantsReviewDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	default:
 		// Unknown dialog
 		break
@@ -4570,6 +4574,24 @@ func (m *UI) openQuitDialog() tea.Cmd {
 
 	quitDialog := dialog.NewQuit(m.com)
 	m.dialog.OpenDialog(quitDialog)
+	return nil
+}
+
+// openGrantsReviewDialog opens the saved command grants review on demand,
+// listing the scoped entries currently in the workspace config. With no
+// saved grants it just says so instead of opening an empty dialog.
+func (m *UI) openGrantsReviewDialog() tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.GrantsReviewID) {
+		// Bring to front
+		m.dialog.BringToFront(dialog.GrantsReviewID)
+		return nil
+	}
+
+	dlg := dialog.NewGrantsReview(m.com, scopedGrantEntries(m.com.Config()))
+	if !dlg.HasRows() {
+		return util.ReportInfo("No saved command grants")
+	}
+	m.dialog.OpenDialog(dlg)
 	return nil
 }
 

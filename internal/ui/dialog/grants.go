@@ -2,6 +2,7 @@ package dialog
 
 import (
 	"fmt"
+	"image"
 	"strings"
 
 	"charm.land/bubbles/v2/help"
@@ -44,7 +45,10 @@ type GrantsReview struct {
 	help   help.Model
 	rows   []grantRow
 	cursor int
-	keyMap struct{ Up, Down, Toggle, Done, Close key.Binding }
+	// rowsArea is the on-screen strip of grant rows, cached at draw time
+	// so mouse clicks resolve to the row the user sees.
+	rowsArea image.Rectangle
+	keyMap   struct{ Up, Down, Toggle, Done, Close key.Binding }
 }
 
 var _ Dialog = (*GrantsReview)(nil)
@@ -108,6 +112,9 @@ func (g *GrantsReview) HandleMsg(msg tea.Msg) Action {
 	if len(g.rows) == 0 {
 		return ActionClose{}
 	}
+	if click, ok := msg.(tea.MouseClickMsg); ok {
+		return g.handleMouseClick(click)
+	}
 	keyMsg, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return nil
@@ -131,6 +138,22 @@ func (g *GrantsReview) HandleMsg(msg tea.Msg) Action {
 			g.rows[idx].keep = !g.rows[idx].keep
 		}
 	}
+	return nil
+}
+
+// handleMouseClick toggles the checkbox of the row under the pointer,
+// matching the digit-key behavior: the click stages the change and enter
+// still applies it.
+func (g *GrantsReview) handleMouseClick(msg tea.MouseClickMsg) Action {
+	if msg.Button != tea.MouseLeft || !image.Pt(msg.X, msg.Y).In(g.rowsArea) {
+		return nil
+	}
+	idx := msg.Y - g.rowsArea.Min.Y
+	if idx < 0 || idx >= len(g.rows) {
+		return nil
+	}
+	g.cursor = idx
+	g.rows[idx].keep = !g.rows[idx].keep
 	return nil
 }
 
@@ -187,7 +210,18 @@ func (g *GrantsReview) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 	content = lipgloss.JoinVertical(lipgloss.Left, content, "", helpView)
 
-	DrawCenter(scr, area, dialogStyle.Render(content))
+	view := dialogStyle.Render(content)
+	vw, vh := lipgloss.Size(view)
+	vw = min(vw, area.Dx())
+	vh = min(vh, area.Dy())
+	rect := common.CenterRect(area, vw, vh)
+	// Rows sit below the four header lines (title, blank, explainer,
+	// blank) inside the frame; cache that strip for click hit-testing.
+	left := rect.Min.X + dialogStyle.GetHorizontalFrameSize()/2
+	top := rect.Min.Y + dialogStyle.GetVerticalFrameSize()/2 + 4
+	g.rowsArea = image.Rect(left, top, left+contentWidth, top+len(g.rows))
+
+	uv.NewStyledString(view).Draw(scr, rect)
 	return nil
 }
 

@@ -1,12 +1,14 @@
 package dialog
 
 import (
+	"image"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/styles"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 )
@@ -21,6 +23,45 @@ func newTestPermissions(t *testing.T) *Permissions {
 		ToolName:   "bash",
 	}
 	return NewPermissions(com, perm)
+}
+
+// TestPermissionsMouseClickFiresButtonOption proves the cached button
+// compositors let a click commit the option under the pointer: Allow on the
+// left of the button row allows, Deny on the right denies.
+func TestPermissionsMouseClickFiresButtonOption(t *testing.T) {
+	t.Parallel()
+
+	p := newTestPermissions(t)
+	scr := uv.NewScreenBuffer(100, 40)
+	p.Draw(scr, image.Rect(0, 0, 100, 40))
+	require.NotEmpty(t, p.buttonHits)
+	require.False(t, p.buttonArea.Empty())
+
+	// Sweep the strip to find each button's x, then click it.
+	findX := func(col int) int {
+		for x := p.buttonArea.Min.X; x < p.buttonArea.Max.X; x++ {
+			if common.HitButtonIndex(p.buttonHits[0], x, p.buttonArea.Min.Y) == col {
+				return x
+			}
+		}
+		t.Fatalf("button column %d not hit-testable in the cached strip", col)
+		return -1
+	}
+
+	action := p.HandleMsg(tea.MouseClickMsg(tea.Mouse{X: findX(0), Y: p.buttonArea.Min.Y, Button: tea.MouseLeft}))
+	resp, ok := action.(ActionPermissionResponse)
+	require.True(t, ok)
+	require.Equal(t, PermissionAllow, resp.Action)
+
+	last := len(p.buttonOptIdx[0]) - 1
+	action = p.HandleMsg(tea.MouseClickMsg(tea.Mouse{X: findX(last), Y: p.buttonArea.Min.Y, Button: tea.MouseLeft}))
+	resp, ok = action.(ActionPermissionResponse)
+	require.True(t, ok)
+	require.Equal(t, PermissionDeny, resp.Action)
+
+	// Right clicks never resolve the request.
+	action = p.HandleMsg(tea.MouseClickMsg(tea.Mouse{X: findX(0), Y: p.buttonArea.Min.Y, Button: tea.MouseRight}))
+	require.Nil(t, action)
 }
 
 // TestPermissions_ActionKeysResolve verifies that action keys produce the

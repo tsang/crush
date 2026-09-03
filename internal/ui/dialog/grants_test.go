@@ -1,11 +1,13 @@
 package dialog
 
 import (
+	"image"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/styles"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/stretchr/testify/require"
 )
 
@@ -84,6 +86,35 @@ func TestGrantsReviewCloseKeepsAll(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, []string{"bash:cmd:mkdir", "bash:cmd:touch", "bash:args:swift build"}, saved.Kept,
 		"closing without deliberate changes must keep every grant")
+}
+
+func TestGrantsReviewMouseClickTogglesRow(t *testing.T) {
+	t.Parallel()
+	g := newTestGrantsReview(t)
+	scr := uv.NewScreenBuffer(80, 30)
+	g.Draw(scr, image.Rect(0, 0, 80, 30))
+	require.False(t, g.rowsArea.Empty())
+
+	// A click on the "touch" row stages its removal; enter still applies.
+	click := tea.MouseClickMsg(tea.Mouse{X: g.rowsArea.Min.X + 1, Y: g.rowsArea.Min.Y + 1, Button: tea.MouseLeft})
+	action := g.HandleMsg(click)
+	require.Nil(t, action, "clicking only toggles, it never applies")
+	require.False(t, g.rows[1].keep)
+	require.Equal(t, 1, g.cursor)
+
+	action = g.HandleMsg(tea.KeyPressMsg{Code: tea.KeyEnter})
+	saved, ok := action.(ActionSaveGrants)
+	require.True(t, ok)
+	require.Equal(t, []string{"bash:cmd:mkdir", "bash:args:swift build"}, saved.Kept)
+
+	// A second click toggles the same row back on.
+	g.HandleMsg(click)
+	require.True(t, g.rows[1].keep)
+
+	// Clicks outside the row strip change nothing.
+	g.HandleMsg(tea.MouseClickMsg(tea.Mouse{X: g.rowsArea.Min.X + 1, Y: g.rowsArea.Min.Y - 2, Button: tea.MouseLeft}))
+	require.True(t, g.rows[0].keep)
+	require.True(t, g.rows[1].keep)
 }
 
 func TestGrantsReviewEmptyCloses(t *testing.T) {
