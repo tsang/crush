@@ -3,6 +3,7 @@ package dialog
 import (
 	"encoding/json"
 	"fmt"
+	"image"
 	"strings"
 
 	"charm.land/bubbles/v2/help"
@@ -61,11 +62,23 @@ type Permissions struct {
 	fullscreen   bool // true when dialog is fullscreen
 
 	permission     permission.PermissionRequest
-	selectedOption int // 0: Allow, 1: Allow for session, 2: Deny
+	selectedOption int // 0: Allow, 1: Allow (all) Cmd(s) for Session, 2: Deny (plus 2: Allow only Cmd(s)+Args and 3: Deny when scope tiers apply; an unknown scope leaves only Allow and Deny)
 
 	viewport      viewport.Model
 	viewportDirty bool // true when viewport content needs to be re-rendered
 	viewportWidth int
+
+	// Mouse interaction state for the option buttons, cached at draw
+	// time: one hit-test compositor per rendered button row plus the
+	// layout geometry they mirror.
+	buttonHits    []*lipgloss.Compositor
+	buttonRows    [][]common.ButtonOpts
+	buttonOptIdx  [][]int
+	buttonPad     []int
+	buttonSpacing string
+	buttonArea    image.Rectangle
+	hoverX        int
+	hoverY        int
 
 	// Diff view state.
 	diffSplitMode        *bool // nil means use default based on width
@@ -85,6 +98,7 @@ type permissionsKeyMap struct {
 	Select           key.Binding
 	Allow            key.Binding
 	AllowSession     key.Binding
+	AllowSessionArgs key.Binding
 	Deny             key.Binding
 	Close            key.Binding
 	ToggleDiffMode   key.Binding
@@ -121,7 +135,11 @@ func defaultPermissionsKeyMap() permissionsKeyMap {
 		),
 		AllowSession: key.NewBinding(
 			key.WithKeys("s", "S", "ctrl+s"),
-			key.WithHelp("s", "allow session"),
+			key.WithHelp("s", "allow cmd session"),
+		),
+		AllowSessionArgs: key.NewBinding(
+			key.WithKeys("g", "G"),
+			key.WithHelp("g", "allow cmd+args session"),
 		),
 		Deny: key.NewBinding(
 			key.WithKeys("d", "D"),
@@ -239,16 +257,21 @@ func (p *Permissions) HandleMsg(msg tea.Msg) Action {
 			// Escape denies the permission request.
 			return p.respond(PermissionDeny)
 		case key.Matches(msg, p.keyMap.Right), key.Matches(msg, p.keyMap.Tab):
-			p.selectedOption = (p.selectedOption + 1) % 3
+			p.selectedOption = (p.selectedOption + 1) % p.numOptions()
 		case key.Matches(msg, p.keyMap.Left):
-			// Add 2 instead of subtracting 1 to avoid negative modulo.
-			p.selectedOption = (p.selectedOption + 2) % 3
+			// Add numOptions-1 instead of subtracting 1 to avoid negative modulo.
+			p.selectedOption = (p.selectedOption + p.numOptions() - 1) % p.numOptions()
 		case key.Matches(msg, p.keyMap.Select):
 			return p.selectCurrentOption()
 		case key.Matches(msg, p.keyMap.Allow):
 			return p.respond(PermissionAllow)
 		case key.Matches(msg, p.keyMap.AllowSession):
-			return p.respond(PermissionAllowForSession)
+			return p.allowSession()
+		case key.Matches(msg, p.keyMap.AllowSessionArgs):
+			if p.hasScopeTiers() {
+				return p.respondSession(permission.ScopeSubject(permission.ScopeArgs, p.permission.SubjectFull))
+			}
+			return nil
 		case key.Matches(msg, p.keyMap.Deny):
 			return p.respond(PermissionDeny)
 		case key.Matches(msg, p.keyMap.ToggleDiffMode):
@@ -278,6 +301,10 @@ func (p *Permissions) HandleMsg(msg tea.Msg) Action {
 				p.viewport, _ = p.viewport.Update(msg)
 			}
 		}
+	case tea.MouseClickMsg:
+		return p.handleMouseClick(msg)
+	case tea.MouseMotionMsg:
+		p.hoverX, p.hoverY = msg.X, msg.Y
 	case common.CoalescedWheelMsg:
 		if p.hasDiffView() {
 			if msg.DeltaX < 0 {
@@ -302,13 +329,97 @@ func (p *Permissions) HandleMsg(msg tea.Msg) Action {
 }
 
 func (p *Permissions) selectCurrentOption() tea.Msg {
-	switch p.selectedOption {
-	case 0:
+	return p.respondOption(p.selectedOption)
+}
+
+// respondOption resolves the request at the given option's tier: 0 Allow,
+// 1 session cmd, 2 cmd+args when scope tiers apply, anything else Deny. An
+// unknown scope only ever offers Allow and Deny, so a grant can't be minted
+// from "?". Shared by keyboard confirmation and mouse button clicks.
+func (p *Permissions) respondOption(idx int) tea.Msg {
+	if !p.canGrantSession() {
+		if idx == 0 {
+			return p.respond(PermissionAllow)
+		}
+		return p.respond(PermissionDeny)
+	}
+	switch {
+	case idx == 0:
 		return p.respond(PermissionAllow)
-	case 1:
-		return p.respond(PermissionAllowForSession)
+	case idx == 1:
+		return p.allowSession()
+	case idx == 2 && p.hasScopeTiers():
+		return p.respondSession(permission.ScopeSubject(permission.ScopeArgs, p.permission.SubjectFull))
 	default:
 		return p.respond(PermissionDeny)
+	}
+}
+
+// handleMouseClick fires the option whose button sits under the pointer,
+// mirroring the inline question dialogs where clicking a button commits it.
+func (p *Permissions) handleMouseClick(msg tea.MouseClickMsg) Action {
+	if msg.Button != tea.MouseLeft {
+		return nil
+	}
+	for r, comp := range p.buttonHits {
+		if r >= len(p.buttonOptIdx) {
+			break
+		}
+		idx := common.HitButtonIndex(comp, msg.X, msg.Y)
+		if idx < 0 || idx >= len(p.buttonOptIdx[r]) {
+			continue
+		}
+		return p.respondOption(p.buttonOptIdx[r][idx])
+	}
+	return nil
+}
+
+// canGrantSession reports whether this request can be remembered for the
+// session. An unknown scope means the derivation could not read the command's
+// binaries, so the user must decide each time.
+func (p *Permissions) canGrantSession() bool {
+	return p.permission.Subject != permission.ScopeUnknown
+}
+
+// hasScopeTiers reports whether the request exposes the separate Cmd and
+// Cmd+Args session grants: bash calls with two distinct scope strings.
+func (p *Permissions) hasScopeTiers() bool {
+	return p.permission.ToolName == tools.BashToolName &&
+		p.permission.Subject != "" &&
+		p.permission.SubjectFull != "" &&
+		p.permission.SubjectFull != p.permission.Subject
+}
+
+func (p *Permissions) numOptions() int {
+	switch {
+	case !p.canGrantSession():
+		return 2
+	case p.hasScopeTiers():
+		return 4
+	default:
+		return 3
+	}
+}
+
+// allowSession grants the session permission at the appropriate tier: the
+// cmd tier (prefixed) for scoped bash calls, legacy verbatim otherwise. An
+// unknown scope falls back to allowing this call only.
+func (p *Permissions) allowSession() tea.Msg {
+	if !p.canGrantSession() {
+		return p.respond(PermissionAllow)
+	}
+	if p.permission.ToolName == tools.BashToolName && p.permission.Subject != "" {
+		return p.respondSession(permission.ScopeSubject(permission.ScopeCmd, p.permission.Subject))
+	}
+	return p.respond(PermissionAllowForSession)
+}
+
+func (p *Permissions) respondSession(subject string) tea.Msg {
+	perm := p.permission
+	perm.Subject = subject
+	return ActionPermissionResponse{
+		Permission: perm,
+		Action:     PermissionAllowForSession,
 	}
 }
 
@@ -441,8 +552,33 @@ func (p *Permissions) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	parts = append(parts, "", buttons, "", helpView)
 
 	innerContent := lipgloss.JoinVertical(lipgloss.Left, parts...)
-	DrawCenterCursor(scr, area, dialogStyle.Render(innerContent), nil)
+	view := dialogStyle.Render(innerContent)
+	vw, vh := lipgloss.Size(view)
+	vw = min(vw, area.Dx())
+	vh = min(vh, area.Dy())
+	rect := common.CenterRect(area, vw, vh)
+	offset := lipgloss.Height(header) + 1
+	if content != "" {
+		offset += 1 + lipgloss.Height(content)
+	}
+	p.layoutButtonHits(rect, dialogStyle, contentWidth, offset)
+	uv.NewStyledString(view).Draw(scr, rect)
 	return nil
+}
+
+// layoutButtonHits anchors one hit-test compositor per cached button row at
+// the rect the dialog was just drawn into, so MouseClickMsg and hover
+// resolve to option indices. offsetBeforeButtons counts the lines sitting
+// above the button block inside the dialog content.
+func (p *Permissions) layoutButtonHits(rect uv.Rectangle, dialogStyle lipgloss.Style, contentWidth, offsetBeforeButtons int) {
+	left := rect.Min.X + dialogStyle.GetHorizontalFrameSize()/2
+	top := rect.Min.Y + dialogStyle.GetVerticalFrameSize()/2 + offsetBeforeButtons
+	p.buttonHits = nil
+	for r, row := range p.buttonRows {
+		x := left + max(0, p.buttonPad[r])
+		p.buttonHits = append(p.buttonHits, common.ButtonHitCompositor(p.com.Styles, row, p.buttonSpacing, x, top+r))
+	}
+	p.buttonArea = image.Rect(left, top, left+contentWidth, top+len(p.buttonRows))
 }
 
 func (p *Permissions) renderHeader(contentWidth int) string {
@@ -455,6 +591,22 @@ func (p *Permissions) renderHeader(contentWidth int) string {
 	toolLine := p.renderToolName(contentWidth)
 
 	lines := []string{title, "", toolLine}
+
+	// Scope tiers offered by the session grant buttons, shown directly under
+	// the tool name so the breadth of each choice is the first thing read.
+	if p.permission.Subject != "" {
+		cmdLabel := "Cmd "
+		if len(permission.SplitSubject(p.permission.Subject)) > 1 {
+			cmdLabel = "Cmds"
+		}
+		lines = append(lines, p.renderKeyValue(cmdLabel, p.permission.Subject, contentWidth))
+	}
+	if p.hasScopeTiers() {
+		// One cmd+args shape per line: each is exactly what an args-tier
+		// grant covers, so the list is the grant's fine print.
+		args := strings.Join(permission.SplitSubject(p.permission.SubjectFull), "\n")
+		lines = append(lines, p.renderKeyValue("Args", args, contentWidth))
+	}
 
 	// Show generic Path only for tools that don't render their own file/path line.
 	switch p.permission.ToolName {
@@ -509,9 +661,22 @@ func (p *Permissions) renderKeyValue(key, value string, width int) string {
 	valueStyle := t.Dialog.Permissions.ValueText
 
 	keyStr := keyStyle.Render(key)
-	valueStr := valueStyle.Width(width - lipgloss.Width(keyStr) - 1).Render(" " + value)
+	valueWidth := max(0, width-lipgloss.Width(keyStr)-1)
 
-	return lipgloss.JoinHorizontal(lipgloss.Left, keyStr, valueStr)
+	// Multi-line values hang-align under the key: the key labels the
+	// whole column, not just its first entry.
+	lines := strings.Split(value, "\n")
+	rendered := make([]string, 0, len(lines))
+	for i, line := range lines {
+		block := valueStyle.Width(valueWidth).Render(" " + line)
+		if i == 0 {
+			block = lipgloss.JoinHorizontal(lipgloss.Left, keyStr, block)
+		} else {
+			block = lipgloss.JoinHorizontal(lipgloss.Left, strings.Repeat(" ", lipgloss.Width(keyStr)), block)
+		}
+		rendered = append(rendered, block)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, rendered...)
 }
 
 func (p *Permissions) renderToolName(width int) string {
@@ -761,30 +926,98 @@ func (p *Permissions) renderContentPanel(content string, width int) string {
 }
 
 func (p *Permissions) renderButtons(contentWidth int, fullscreen bool) string {
+	sessionLabel := "Allow for Session"
+	argsLabel := "Allow Cmd+Args for Session"
+	if p.permission.Subject != "" {
+		sessionLabel = "Allow Cmd for Session"
+		if len(permission.SplitSubject(p.permission.Subject)) > 1 {
+			// "all" vs "only" states the tier difference the buttons
+			// choose between: any invocation of these binaries, or
+			// exactly the shapes listed above.
+			sessionLabel = "Allow all Cmds for Session"
+			argsLabel = "Allow only Cmds+Args for Session"
+		}
+	}
 	buttons := []common.ButtonOpts{
 		{Text: "Allow", UnderlineIndex: 0, Selected: p.selectedOption == 0},
-		{Text: "Allow for Session", UnderlineIndex: 10, Selected: p.selectedOption == 1},
-		{Text: "Deny", UnderlineIndex: 0, Selected: p.selectedOption == 2},
 	}
+	if p.canGrantSession() {
+		buttons = append(buttons, common.ButtonOpts{Text: sessionLabel, UnderlineIndex: strings.Index(sessionLabel, "Session"), Selected: p.selectedOption == 1})
+	}
+	if p.hasScopeTiers() {
+		buttons = append(buttons, common.ButtonOpts{Text: argsLabel, UnderlineIndex: strings.Index(argsLabel, "Session"), Selected: p.selectedOption == 2})
+	}
+	buttons = append(buttons, common.ButtonOpts{Text: "Deny", UnderlineIndex: 0, Selected: p.selectedOption == p.numOptions()-1})
 
-	content := common.ButtonGroup(p.com.Styles, buttons, "  ")
-
-	// Center when stacked or when the dialog fills the screen; otherwise
-	// hug the right edge next to the content. Right-aligning across a
+	// Layout: one right-aligned row when everything fits; two rows of two
+	// when four options overflow (keeps Allow/Deny semantics visible
+	// instead of a four-deep single-column tower); a centered stack for
+	// three options or a fullscreen dialog. Right-aligning across a
 	// full-screen width leaves the buttons stranded in the corner.
-	align := lipgloss.Right
-	if fullscreen {
-		align = lipgloss.Center
+	spacing := "  "
+	rows := [][]common.ButtonOpts{buttons}
+	if lipgloss.Width(common.ButtonGroup(p.com.Styles, buttons, spacing)) > contentWidth {
+		if len(buttons) == 4 {
+			spacing = " "
+			rows = [][]common.ButtonOpts{buttons[:2], buttons[2:]}
+		} else {
+			rows = make([][]common.ButtonOpts, len(buttons))
+			for i := range buttons {
+				rows[i] = buttons[i : i+1]
+			}
+		}
 	}
-	if lipgloss.Width(content) > contentWidth {
-		content = common.ButtonGroup(p.com.Styles, buttons, "\n")
-		align = lipgloss.Center
+	centered := fullscreen || len(rows) > 1
+
+	// Mark hover and stash hit-test geometry from the previous frame —
+	// button positions only move on resize, so this trails by at most one
+	// frame, the same trade the inline question dialogs make.
+	hover := func(row []common.ButtonOpts, r int) []common.ButtonOpts {
+		out := make([]common.ButtonOpts, len(row))
+		copy(out, row)
+		if r < len(p.buttonHits) {
+			if idx := common.HitButtonIndex(p.buttonHits[r], p.hoverX, p.hoverY); idx >= 0 && idx < len(out) {
+				out[idx].Hovered = true
+			}
+		}
+		return out
+	}
+	idx := 0
+	idxRows := make([][]int, len(rows))
+	rendered := make([]string, len(rows))
+	pads := make([]int, len(rows))
+	for r, row := range rows {
+		hoverRow := hover(row, r)
+		opts := make([]string, len(hoverRow))
+		idxRow := make([]int, len(hoverRow))
+		for c := range hoverRow {
+			opts[c] = common.Button(p.com.Styles, hoverRow[c])
+			idxRow[c] = idx
+			idx++
+		}
+		rendered[r] = strings.Join(opts, spacing)
+		idxRows[r] = idxRow
+		// Leading indent the Width+Align block will apply per row, reused
+		// by the hit-test compositors so clicks match what's drawn.
+		pads[r] = max(0, contentWidth-lipgloss.Width(rendered[r]))
+		if centered {
+			pads[r] /= 2
+		}
 	}
 
+	p.buttonRows = rows
+	p.buttonOptIdx = idxRows
+	p.buttonPad = pads
+	p.buttonSpacing = spacing
+
+	align := lipgloss.Right
+	if centered {
+		align = lipgloss.Center
+	}
 	return lipgloss.NewStyle().
 		Width(contentWidth).
 		Align(align).
-		Render(content)
+		Render(strings.Join(rendered, "\n"))
 }
 
 func (p *Permissions) canScroll() bool {

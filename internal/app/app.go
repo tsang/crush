@@ -107,10 +107,20 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 	}
 
 	app := &App{
-		Sessions:    sessions,
-		Messages:    messages,
-		History:     files,
-		Permissions: permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, allowedTools),
+		Sessions: sessions,
+		Messages: messages,
+		History:  files,
+		Permissions: permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, allowedTools,
+			// Re-read the allow-list from live config so scoped grants
+			// persisted to the workspace config apply without a restart.
+			permission.WithAllowedToolsSource(func() []string {
+				c := store.Config()
+				if c == nil || c.Permissions == nil {
+					return nil
+				}
+				return c.Permissions.AllowedTools
+			}),
+		),
 		Questions:   question.NewService(),
 		FileTracker: filetracker.NewService(q),
 		LSPManager:  lsp.NewManager(store),
