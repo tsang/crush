@@ -61,7 +61,7 @@ type Permissions struct {
 	fullscreen   bool // true when dialog is fullscreen
 
 	permission     permission.PermissionRequest
-	selectedOption int // 0: Allow, 1: Allow Cmd for Session, 2: Deny (plus 2: Allow Cmd+Args and 3: Deny when scope tiers apply; an unknown scope leaves only Allow and Deny)
+	selectedOption int // 0: Allow, 1: Allow (all) Cmd(s) for Session, 2: Deny (plus 2: Allow only Cmd(s)+Args and 3: Deny when scope tiers apply; an unknown scope leaves only Allow and Deny)
 
 	viewport      viewport.Model
 	viewportDirty bool // true when viewport content needs to be re-rendered
@@ -529,10 +529,16 @@ func (p *Permissions) renderHeader(contentWidth int) string {
 	// Scope tiers offered by the session grant buttons, shown directly under
 	// the tool name so the breadth of each choice is the first thing read.
 	if p.permission.Subject != "" {
-		lines = append(lines, p.renderKeyValue("Cmd ", p.permission.Subject, contentWidth))
+		cmdLabel := "Cmd "
+		if len(permission.SplitSubject(p.permission.Subject)) > 1 {
+			cmdLabel = "Cmds"
+		}
+		lines = append(lines, p.renderKeyValue(cmdLabel, p.permission.Subject, contentWidth))
 	}
 	if p.hasScopeTiers() {
-		args := strings.TrimPrefix(p.permission.SubjectFull, p.permission.Subject+" ")
+		// One cmd+args shape per line: each is exactly what an args-tier
+		// grant covers, so the list is the grant's fine print.
+		args := strings.Join(permission.SplitSubject(p.permission.SubjectFull), "\n")
 		lines = append(lines, p.renderKeyValue("Args", args, contentWidth))
 	}
 
@@ -589,9 +595,22 @@ func (p *Permissions) renderKeyValue(key, value string, width int) string {
 	valueStyle := t.Dialog.Permissions.ValueText
 
 	keyStr := keyStyle.Render(key)
-	valueStr := valueStyle.Width(width - lipgloss.Width(keyStr) - 1).Render(" " + value)
+	valueWidth := max(0, width-lipgloss.Width(keyStr)-1)
 
-	return lipgloss.JoinHorizontal(lipgloss.Left, keyStr, valueStr)
+	// Multi-line values hang-align under the key: the key labels the
+	// whole column, not just its first entry.
+	lines := strings.Split(value, "\n")
+	rendered := make([]string, 0, len(lines))
+	for i, line := range lines {
+		block := valueStyle.Width(valueWidth).Render(" " + line)
+		if i == 0 {
+			block = lipgloss.JoinHorizontal(lipgloss.Left, keyStr, block)
+		} else {
+			block = lipgloss.JoinHorizontal(lipgloss.Left, strings.Repeat(" ", lipgloss.Width(keyStr)), block)
+		}
+		rendered = append(rendered, block)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, rendered...)
 }
 
 func (p *Permissions) renderToolName(width int) string {
@@ -842,8 +861,16 @@ func (p *Permissions) renderContentPanel(content string, width int) string {
 
 func (p *Permissions) renderButtons(contentWidth int, fullscreen bool) string {
 	sessionLabel := "Allow for Session"
+	argsLabel := "Allow Cmd+Args for Session"
 	if p.permission.Subject != "" {
 		sessionLabel = "Allow Cmd for Session"
+		if len(permission.SplitSubject(p.permission.Subject)) > 1 {
+			// "all" vs "only" states the tier difference the buttons
+			// choose between: any invocation of these binaries, or
+			// exactly the shapes listed above.
+			sessionLabel = "Allow all Cmds for Session"
+			argsLabel = "Allow only Cmds+Args for Session"
+		}
 	}
 	buttons := []common.ButtonOpts{
 		{Text: "Allow", UnderlineIndex: 0, Selected: p.selectedOption == 0},
@@ -852,7 +879,6 @@ func (p *Permissions) renderButtons(contentWidth int, fullscreen bool) string {
 		buttons = append(buttons, common.ButtonOpts{Text: sessionLabel, UnderlineIndex: strings.Index(sessionLabel, "Session"), Selected: p.selectedOption == 1})
 	}
 	if p.hasScopeTiers() {
-		argsLabel := "Allow Cmd+Args for Session"
 		buttons = append(buttons, common.ButtonOpts{Text: argsLabel, UnderlineIndex: strings.Index(argsLabel, "Session"), Selected: p.selectedOption == 2})
 	}
 	buttons = append(buttons, common.ButtonOpts{Text: "Deny", UnderlineIndex: 0, Selected: p.selectedOption == p.numOptions()-1})
