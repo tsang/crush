@@ -183,7 +183,12 @@ func (g *GrantsReview) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	dialogStyle := t.Dialog.View.Width(width).Padding(0, 1)
 	contentWidth := width - dialogStyle.GetHorizontalFrameSize()
 
-	title := common.DialogTitle(t, "Saved Command Grants", contentWidth, t.Dialog.TitleGradFromColor, t.Dialog.TitleGradToColor)
+	// Size the title to the content width MINUS the title style's own
+	// frame: the Title style adds horizontal padding, and a title sized
+	// to the full content width overflows the dialog's inner width and
+	// rewraps inside the frame — a row the header measurement wouldn't
+	// see, shifting click hit-testing by one line.
+	title := common.DialogTitle(t, "Saved Command Grants", contentWidth-t.Dialog.Title.GetHorizontalFrameSize(), t.Dialog.TitleGradFromColor, t.Dialog.TitleGradToColor)
 	title = t.Dialog.Title.Render(title)
 
 	explainer := t.Dialog.Permissions.ValueText.Width(contentWidth).Render("Pre-approved from your workspace config. Uncheck to revoke this session.")
