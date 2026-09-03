@@ -186,12 +186,10 @@ func (g *GrantsReview) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	title := common.DialogTitle(t, "Saved Command Grants", contentWidth, t.Dialog.TitleGradFromColor, t.Dialog.TitleGradToColor)
 	title = t.Dialog.Title.Render(title)
 
-	lines := []string{
-		title,
-		"",
-		t.Dialog.Permissions.ValueText.Render("Pre-approved from your workspace config. Uncheck to revoke this session."),
-		"",
-	}
+	explainer := t.Dialog.Permissions.ValueText.Width(contentWidth).Render("Pre-approved from your workspace config. Uncheck to revoke this session.")
+	header := lipgloss.JoinVertical(lipgloss.Left, title, "", explainer, "")
+
+	rowLines := make([]string, 0, len(g.rows))
 	for i, row := range g.rows {
 		mark := "[ ]"
 		if row.keep {
@@ -203,22 +201,23 @@ func (g *GrantsReview) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 		if i == g.cursor {
 			style = t.Dialog.SelectedItem
 		}
-		lines = append(lines, style.Render(text))
+		rowLines = append(rowLines, style.Render(text))
 	}
 
 	helpView := shortHelpLine(&g.help, g.ShortHelp(), contentWidth)
-	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
-	content = lipgloss.JoinVertical(lipgloss.Left, content, "", helpView)
+	content := lipgloss.JoinVertical(lipgloss.Left, header, lipgloss.JoinVertical(lipgloss.Left, rowLines...), "", helpView)
 
 	view := dialogStyle.Render(content)
 	vw, vh := lipgloss.Size(view)
 	vw = min(vw, area.Dx())
 	vh = min(vh, area.Dy())
 	rect := common.CenterRect(area, vw, vh)
-	// Rows sit below the four header lines (title, blank, explainer,
-	// blank) inside the frame; cache that strip for click hit-testing.
+	// Cache the row strip for click hit-testing from the rendered header
+	// height: a wrapped explainer or title shifts the rows, and a fixed
+	// line count silently drifts the mapping by however many lines the
+	// header wrapped.
 	left := rect.Min.X + dialogStyle.GetHorizontalFrameSize()/2
-	top := rect.Min.Y + dialogStyle.GetVerticalFrameSize()/2 + 4
+	top := rect.Min.Y + dialogStyle.GetVerticalFrameSize()/2 + lipgloss.Height(header)
 	g.rowsArea = image.Rect(left, top, left+contentWidth, top+len(g.rows))
 
 	uv.NewStyledString(view).Draw(scr, rect)

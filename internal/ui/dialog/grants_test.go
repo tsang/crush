@@ -117,6 +117,31 @@ func TestGrantsReviewMouseClickTogglesRow(t *testing.T) {
 	require.True(t, g.rows[1].keep)
 }
 
+// TestGrantsReviewRowsTrackWrappedHeader pins the click mapping to the
+// rendered layout: on a narrow terminal the explainer wraps and the rows
+// shift down, and the cached strip must move with them.
+func TestGrantsReviewRowsTrackWrappedHeader(t *testing.T) {
+	t.Parallel()
+	s := styles.CharmtonePantera()
+	com := &common.Common{Styles: &s}
+	g := NewGrantsReview(com, []string{"bash:cmd:mkdir", "bash:cmd:touch"})
+
+	scr := uv.NewScreenBuffer(30, 30)
+	g.Draw(scr, image.Rect(0, 0, 30, 30))
+	narrowTop := g.rowsArea.Min.Y
+
+	g.HandleMsg(tea.MouseClickMsg(tea.Mouse{X: g.rowsArea.Min.X + 1, Y: narrowTop, Button: tea.MouseLeft}))
+	require.False(t, g.rows[0].keep, "the strip's first line must be the first row even when the header wraps")
+	require.True(t, g.rows[1].keep)
+	g.HandleMsg(tea.MouseClickMsg(tea.Mouse{X: g.rowsArea.Min.X + 1, Y: narrowTop, Button: tea.MouseLeft}))
+
+	g.Draw(scr, image.Rect(0, 0, 100, 30))
+	require.Less(t, g.rowsArea.Min.Y, narrowTop, "a wider dialog unwraps the explainer and lifts the rows")
+	g.HandleMsg(tea.MouseClickMsg(tea.Mouse{X: g.rowsArea.Min.X + 1, Y: g.rowsArea.Min.Y + 1, Button: tea.MouseLeft}))
+	require.False(t, g.rows[1].keep)
+	require.True(t, g.rows[0].keep)
+}
+
 func TestGrantsReviewEmptyCloses(t *testing.T) {
 	t.Parallel()
 	s := styles.CharmtonePantera()
