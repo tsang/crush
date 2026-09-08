@@ -291,3 +291,51 @@ func TestPermissions_DownloadDomainSession(t *testing.T) {
 	require.Equal(t, PermissionAllowForSession, resp.Action)
 	require.Equal(t, "example.com", resp.Permission.Subject)
 }
+
+// TestPermissions_PartialChainSeparatesNew verifies a partially approved
+// chain renders two scope sections: the binaries that already carry a
+// grant and the new ones the approval is actually about.
+func TestPermissions_PartialChainSeparatesNew(t *testing.T) {
+	t.Parallel()
+
+	p := newTestPermissions(t)
+	p.permission.Subject = "git,mkdir,swift"
+	p.permission.SubjectFull = "git commit,mkdir,swift build"
+	p.permission.SubjectNew = "swift"
+
+	covered := p.coveredSubjectTokens()
+	require.Equal(t, []string{"git", "mkdir"}, covered)
+
+	header := ansi.Strip(p.renderHeader(120))
+	require.Contains(t, header, "Allowed")
+	require.Contains(t, header, "git,mkdir")
+	require.Contains(t, header, "New")
+	require.Contains(t, header, "swift")
+	require.NotContains(t, header, "Cmd")
+
+	// Approving the cmd tier still grants the full chain, new included.
+	p.selectedOption = 1
+	action := p.HandleMsg(tea.KeyPressMsg{Code: tea.KeyEnter})
+	resp, ok := action.(ActionPermissionResponse)
+	require.True(t, ok)
+	require.Equal(t, PermissionAllowForSession, resp.Action)
+	require.Equal(t, "cmd:git,mkdir,swift", resp.Permission.Subject)
+}
+
+// TestPermissions_FullyUncoveredChainKeepsSingleList verifies a chain with
+// nothing approved yet keeps the original single Cmd list, with no split.
+func TestPermissions_FullyUncoveredChainKeepsSingleList(t *testing.T) {
+	t.Parallel()
+
+	p := newTestPermissions(t)
+	p.permission.Subject = "mkdir,swift"
+	p.permission.SubjectFull = "mkdir,swift build"
+	p.permission.SubjectNew = "mkdir,swift"
+
+	require.Empty(t, p.coveredSubjectTokens())
+
+	header := ansi.Strip(p.renderHeader(120))
+	require.Contains(t, header, "Cmds")
+	require.NotContains(t, header, "Allowed")
+	require.NotContains(t, header, "New")
+}

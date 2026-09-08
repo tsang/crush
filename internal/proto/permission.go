@@ -36,6 +36,7 @@ type PermissionRequest struct {
 	Path        string `json:"path"`
 	Subject     string `json:"subject"`
 	SubjectFull string `json:"subject_full,omitempty"`
+	SubjectNew  string `json:"subject_new,omitempty"`
 }
 
 // UnmarshalJSON implements the json.Unmarshaler interface. This is needed

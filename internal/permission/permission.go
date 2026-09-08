@@ -75,6 +75,12 @@ type PermissionRequest struct {
 	Subject string `json:"subject"`
 	// SubjectFull mirrors CreatePermissionRequest.SubjectFull.
 	SubjectFull string `json:"subject_full,omitempty"`
+	// SubjectNew lists the Subject tokens that carried no grant when this
+	// request prompted, joined like Subject. A partially approved chain
+	// still prompts as a whole; this marks the tokens the approval is
+	// actually about, so the dialog can render them apart from the ones
+	// the user already granted.
+	SubjectNew string `json:"subject_new,omitempty"`
 }
 
 type Service interface {
@@ -384,11 +390,61 @@ func (s *permissionService) grantCovers(permission PermissionRequest) bool {
 		return true
 	}
 	for _, bin := range bins {
-		if _, ok := s.sessionPermissions.Get(key.WithSubject(ScopeSubject(ScopeCmd, bin))); !ok {
+		if !s.binGranted(key, permission.ToolName, bin) {
 			return false
 		}
 	}
 	return true
+}
+
+// binGranted reports whether a single command binary carries its own
+// grant: a flat cmd-tier session key at the request path, or a cmd-tier
+// binary pooled from config.
+func (s *permissionService) binGranted(key PermissionKey, tool, bin string) bool {
+	if _, ok := s.sessionPermissions.Get(key.WithSubject(ScopeSubject(ScopeCmd, bin))); ok {
+		return true
+	}
+	return slices.Contains(s.configAllowedBins(tool), bin)
+}
+
+// configAllowedBins collects the cmd-tier binaries approved in config for
+// a tool, pooled across every cmd entry.
+func (s *permissionService) configAllowedBins(tool string) []string {
+	var bins []string
+	for _, entry := range s.scopedAllowedEntries() {
+		eTool, subject, ok := CutScopedEntry(entry)
+		if !ok || eTool != tool {
+			continue
+		}
+		if rest, isCmd := strings.CutPrefix(subject, ScopeCmd); isCmd {
+			bins = append(bins, SplitSubject(rest)...)
+		}
+	}
+	return bins
+}
+
+// uncoveredSubject lists the Subject tokens no existing grant covers,
+// joined like Subject. It is computed only for prompted requests, where at
+// least one token is uncovered by definition, so the result is never empty
+// when Subject is.
+func (s *permissionService) uncoveredSubject(permission PermissionRequest) string {
+	bins := SplitSubject(permission.Subject)
+	if len(bins) == 0 {
+		return ""
+	}
+	key := PermissionKey{
+		SessionID: permission.SessionID,
+		ToolName:  permission.ToolName,
+		Action:    permission.Action,
+		Path:      permission.Path,
+	}
+	var uncovered []string
+	for _, bin := range bins {
+		if !s.binGranted(key, permission.ToolName, bin) {
+			uncovered = append(uncovered, bin)
+		}
+	}
+	return JoinTokens(uncovered)
 }
 
 // WithSubject returns a copy of the key scoped to a single subject, so
@@ -514,6 +570,11 @@ func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRe
 		})
 		return true, nil
 	}
+
+	// The prompt asks about the whole command, but only the uncovered
+	// tokens are the decision; flag them so the dialog can separate new
+	// approvals from grants that already exist.
+	permission.SubjectNew = s.uncoveredSubject(permission)
 
 	s.activeRequestMu.Lock()
 	s.activeRequest = &permission

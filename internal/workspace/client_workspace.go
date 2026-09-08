@@ -1117,6 +1117,9 @@ func (w *ClientWorkspace) translateEvent(ev any) tea.Msg {
 				Action:      e.Payload.Action,
 				Path:        e.Payload.Path,
 				Params:      e.Payload.Params,
+				Subject:     e.Payload.Subject,
+				SubjectFull: e.Payload.SubjectFull,
+				SubjectNew:  e.Payload.SubjectNew,
 			},
 		}
 	case pubsub.Event[proto.PermissionNotification]:

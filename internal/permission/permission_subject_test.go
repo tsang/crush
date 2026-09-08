@@ -342,3 +342,83 @@ func TestDownloadDomainGrantCoversDomain(t *testing.T) {
 		t.Fatal("different domain should have prompted")
 	}
 }
+
+// TestPromptFlagsUncoveredTokens proves a partially approved chain prompts
+// with only the unapproved binaries marked as new, so the dialog can show
+// what the approval is actually about instead of one mixed list.
+func TestPromptFlagsUncoveredTokens(t *testing.T) {
+	service := NewPermissionService("/tmp", false, []string{"bash:cmd:mkdir"})
+
+	// Approve git alone first, so the next chain has one session-granted
+	// binary, one config-granted binary, and one brand new one.
+	first := CreatePermissionRequest{
+		SessionID:   "split-session",
+		ToolCallID:  "call-split-1",
+		ToolName:    "bash",
+		Description: "Execute command: git status",
+		Action:      "execute",
+		Path:        "/tmp",
+		Subject:     "git",
+		SubjectFull: "git status",
+	}
+
+	events := service.Subscribe(t.Context())
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = service.Request(t.Context(), first)
+	}()
+	event := <-events
+	// Mirror the dialog's cmd-tier approval: the session key is stored
+	// with the cmd: prefix so later chains can reuse it per binary.
+	grant := event.Payload
+	grant.Subject = ScopeSubject(ScopeCmd, grant.Subject)
+	require.True(t, service.GrantPersistent(grant))
+	<-done
+
+	second := CreatePermissionRequest{
+		SessionID:   "split-session",
+		ToolCallID:  "call-split-2",
+		ToolName:    "bash",
+		Description: "Execute command: git commit && mkdir out && swift build",
+		Action:      "execute",
+		Path:        "/tmp",
+		Subject:     "git,mkdir,swift",
+		SubjectFull: "git commit,mkdir,swift build",
+	}
+	go func() {
+		_, _ = service.Request(t.Context(), second)
+	}()
+
+	prompt := (<-events).Payload
+	require.Equal(t, "git,mkdir,swift", prompt.Subject)
+	require.Equal(t, "swift", prompt.SubjectNew, "only swift lacks a grant")
+
+	service.Deny(prompt)
+}
+
+// TestPromptFullyUncoveredMarksAllNew proves a chain with no prior grants
+// marks every binary new, so the dialog keeps its single-list display.
+func TestPromptFullyUncoveredMarksAllNew(t *testing.T) {
+	service := NewPermissionService("/tmp", false, []string{})
+
+	req := CreatePermissionRequest{
+		SessionID:   "fresh-session",
+		ToolCallID:  "call-fresh",
+		ToolName:    "bash",
+		Description: "Execute command: mkdir out && swift build",
+		Action:      "execute",
+		Path:        "/tmp",
+		Subject:     "mkdir,swift",
+		SubjectFull: "mkdir,swift build",
+	}
+
+	events := service.Subscribe(t.Context())
+	go func() {
+		_, _ = service.Request(t.Context(), req)
+	}()
+	prompt := (<-events).Payload
+	require.Equal(t, "mkdir,swift", prompt.SubjectNew)
+	service.Deny(prompt)
+}

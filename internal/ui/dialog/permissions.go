@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
+	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/help"
@@ -399,6 +400,25 @@ func (p *Permissions) isDomainScope() bool {
 		p.permission.Subject != permission.ScopeUnknown
 }
 
+// coveredSubjectTokens returns the Subject tokens that already carry a
+// grant: the Subject minus the uncovered tokens the permission service
+// flagged on the prompt. Empty when nothing or everything is covered,
+// where a split display would only add noise.
+func (p *Permissions) coveredSubjectTokens() []string {
+	newTokens := permission.SplitSubject(p.permission.SubjectNew)
+	bins := permission.SplitSubject(p.permission.Subject)
+	if len(newTokens) == 0 || len(newTokens) == len(bins) {
+		return nil
+	}
+	covered := make([]string, 0, len(bins)-len(newTokens))
+	for _, bin := range bins {
+		if !slices.Contains(newTokens, bin) {
+			covered = append(covered, bin)
+		}
+	}
+	return covered
+}
+
 func (p *Permissions) numOptions() int {
 	switch {
 	case !p.canGrantSession():
@@ -604,9 +624,19 @@ func (p *Permissions) renderHeader(contentWidth int) string {
 	// Scope tiers offered by the session grant buttons, shown directly under
 	// the tool name so the breadth of each choice is the first thing read.
 	if p.permission.Subject != "" {
-		if p.isDomainScope() {
+		covered := p.coveredSubjectTokens()
+		switch {
+		case p.isDomainScope():
 			lines = append(lines, p.renderKeyValue("Domain", p.permission.Subject, contentWidth))
-		} else {
+		case len(covered) > 0:
+			// Partially approved chain: split the scope so the binaries
+			// still needing a decision stand apart from the ones already
+			// granted. Approving the session option covers both, but the
+			// new section is what the user is actually weighing.
+			lines = append(lines, p.renderKeyValue("Allowed", strings.Join(covered, permission.SubjectSeparator), contentWidth))
+			pad := strings.Repeat(" ", len("Allowed")-len("New"))
+			lines = append(lines, p.renderKeyValue("New"+pad, p.permission.SubjectNew, contentWidth))
+		default:
 			cmdLabel := "Cmd "
 			if len(permission.SplitSubject(p.permission.Subject)) > 1 {
 				cmdLabel = "Cmds"
