@@ -8,6 +8,7 @@ import (
 	"html/template"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,6 +51,23 @@ func downloadDescription() string {
 	})
 }
 
+// downloadPermissionSubject derives the domain grant subject from a URL. A
+// session grant approved for one URL is stored under this host, so every
+// later download from the same domain is auto-approved without prompting
+// again per file. A URL whose host cannot be parsed becomes the unknown
+// subject, which never covers a grant and therefore prompts every time.
+func downloadPermissionSubject(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return permission.ScopeUnknown
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return permission.ScopeUnknown
+	}
+	return host
+}
+
 func NewDownloadTool(permissions permission.Service, workingDir string, client *http.Client) fantasy.AgentTool {
 	if client == nil {
 		transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -87,15 +105,21 @@ func NewDownloadTool(permissions permission.Service, workingDir string, client *
 				return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for downloading files")
 			}
 
+			// Key the request to the working dir (like fetch) rather than
+			// the destination file, so a session grant is scoped by the
+			// URL's domain and not re-minted per target path.
+			subject := downloadPermissionSubject(params.URL)
 			p, err := permissions.Request(
 				ctx,
 				permission.CreatePermissionRequest{
 					SessionID:   sessionID,
-					Path:        filePath,
+					ToolCallID:  call.ID,
+					Path:        workingDir,
 					ToolName:    DownloadToolName,
 					Action:      "download",
 					Description: fmt.Sprintf("Download file from URL: %s to %s", params.URL, filePath),
 					Params:      DownloadPermissionsParams(params),
+					Subject:     subject,
 				},
 			)
 			if err != nil {

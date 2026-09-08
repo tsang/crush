@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/styles"
@@ -257,4 +258,36 @@ func TestPermissions_UnknownScopeOffersNoSessionGrant(t *testing.T) {
 	require.NotContains(t, buttons, "Session")
 	require.Contains(t, buttons, "Allow")
 	require.Contains(t, buttons, "Deny")
+}
+
+// TestPermissions_DownloadDomainSession verifies the download dialog turns
+// its host subject into a domain grant: the session button offers the whole
+// domain and the grant stores the host verbatim, so later downloads from
+// that host match the stored grant without another prompt.
+func TestPermissions_DownloadDomainSession(t *testing.T) {
+	t.Parallel()
+
+	p := newTestPermissions(t)
+	p.permission.ToolName = tools.DownloadToolName
+	p.permission.Subject = "example.com"
+
+	require.True(t, p.isDomainScope())
+	require.False(t, p.hasScopeTiers())
+	require.Equal(t, 3, p.numOptions())
+
+	buttons := ansi.Strip(p.renderButtons(120, false))
+	require.Contains(t, buttons, "Allow Domain for Session")
+
+	// The header labels the scope as a domain, not a command.
+	header := ansi.Strip(p.renderHeader(80))
+	require.Contains(t, header, "Domain")
+	require.NotContains(t, header, "Cmd")
+
+	// Selecting the session option grants the domain verbatim.
+	p.selectedOption = 1
+	action := p.HandleMsg(tea.KeyPressMsg{Code: tea.KeyEnter})
+	resp, ok := action.(ActionPermissionResponse)
+	require.True(t, ok)
+	require.Equal(t, PermissionAllowForSession, resp.Action)
+	require.Equal(t, "example.com", resp.Permission.Subject)
 }

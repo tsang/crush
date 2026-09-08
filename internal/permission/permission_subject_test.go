@@ -281,3 +281,64 @@ func TestUnknownSubjectNeverCovers(t *testing.T) {
 	_, err := service.Request(ctx, second)
 	require.ErrorIs(t, err, context.DeadlineExceeded, "unknown scope must never be remembered")
 }
+
+// TestDownloadDomainGrantCoversDomain proves the download tool's
+// domain-keyed session grant: approving one download from a host covers
+// every later download from that host, so files no longer re-prompt, while
+// a different host still asks.
+func TestDownloadDomainGrantCoversDomain(t *testing.T) {
+	service := NewPermissionService("/tmp", false, []string{})
+
+	req := CreatePermissionRequest{
+		SessionID:   "download-session",
+		ToolCallID:  "call-dl-1",
+		ToolName:    "download",
+		Description: "Download file from URL: https://example.com/first.zip to /tmp/first.zip",
+		Action:      "download",
+		Path:        "/tmp",
+		Subject:     "example.com",
+	}
+
+	events := service.Subscribe(t.Context())
+
+	var granted bool
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		granted, _ = service.Request(t.Context(), req)
+	}()
+
+	event := <-events
+	require.Equal(t, "example.com", event.Payload.Subject)
+	require.True(t, service.GrantPersistent(event.Payload))
+	<-done
+	require.True(t, granted, "first request should be granted")
+
+	// A different file from the same domain auto-approves.
+	same := req
+	same.ToolCallID = "call-dl-2"
+	same.Description = "Download file from URL: https://example.com/second.zip to /tmp/second.zip"
+	ok, err := service.Request(t.Context(), same)
+	require.NoError(t, err)
+	assert.True(t, ok, "same-domain download should auto-approve")
+
+	// A different domain must still prompt.
+	other := same
+	other.ToolCallID = "call-dl-3"
+	other.Subject = "other.example.net"
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+	prompted := make(chan bool, 1)
+	go func() {
+		g, err := service.Request(ctx, other)
+		prompted <- g && err == nil
+	}()
+
+	select {
+	case ev := <-events:
+		assert.Equal(t, "other.example.net", ev.Payload.Subject, "prompt should carry the new domain")
+		<-prompted
+	case <-time.After(3 * time.Second):
+		t.Fatal("different domain should have prompted")
+	}
+}

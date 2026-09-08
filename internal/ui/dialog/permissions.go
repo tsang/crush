@@ -390,6 +390,15 @@ func (p *Permissions) hasScopeTiers() bool {
 		p.permission.SubjectFull != p.permission.Subject
 }
 
+// isDomainScope reports whether the request's session grant covers a whole
+// URL domain: download calls carry the host as their subject, so approving
+// once lets every later download from that host through unprompted.
+func (p *Permissions) isDomainScope() bool {
+	return p.permission.ToolName == tools.DownloadToolName &&
+		p.permission.Subject != "" &&
+		p.permission.Subject != permission.ScopeUnknown
+}
+
 func (p *Permissions) numOptions() int {
 	switch {
 	case !p.canGrantSession():
@@ -595,11 +604,15 @@ func (p *Permissions) renderHeader(contentWidth int) string {
 	// Scope tiers offered by the session grant buttons, shown directly under
 	// the tool name so the breadth of each choice is the first thing read.
 	if p.permission.Subject != "" {
-		cmdLabel := "Cmd "
-		if len(permission.SplitSubject(p.permission.Subject)) > 1 {
-			cmdLabel = "Cmds"
+		if p.isDomainScope() {
+			lines = append(lines, p.renderKeyValue("Domain", p.permission.Subject, contentWidth))
+		} else {
+			cmdLabel := "Cmd "
+			if len(permission.SplitSubject(p.permission.Subject)) > 1 {
+				cmdLabel = "Cmds"
+			}
+			lines = append(lines, p.renderKeyValue(cmdLabel, p.permission.Subject, contentWidth))
 		}
-		lines = append(lines, p.renderKeyValue(cmdLabel, p.permission.Subject, contentWidth))
 	}
 	if p.hasScopeTiers() {
 		// One cmd+args shape per line: each is exactly what an args-tier
@@ -928,7 +941,9 @@ func (p *Permissions) renderContentPanel(content string, width int) string {
 func (p *Permissions) renderButtons(contentWidth int, fullscreen bool) string {
 	sessionLabel := "Allow for Session"
 	argsLabel := "Allow Cmd+Args for Session"
-	if p.permission.Subject != "" {
+	if p.isDomainScope() {
+		sessionLabel = "Allow Domain for Session"
+	} else if p.permission.Subject != "" {
 		sessionLabel = "Allow Cmd for Session"
 		if len(permission.SplitSubject(p.permission.Subject)) > 1 {
 			// "all" vs "only" states the tier difference the buttons

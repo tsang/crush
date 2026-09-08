@@ -97,7 +97,12 @@ internal/
 
 ## Build/Test/Lint Commands
 
-- **Build**: `go build .` or `go run .`
+- **Build**: Do NOT build locally. Build by pushing to GitHub — CI produces
+  the `crush-darwin` artifact, then `./ci-crush-install.sh <build-run-id>`
+  (from the fork root) downloads and installs it. `go build .` is listed
+  below for reference only, and only quick `go vet`/single-package `go test`
+  feedback loops are fine locally.
+- **Build (reference)**: `go build .` or `go run .`
 - **Test**: `task test` or `go test ./...` (run single test:
   `go test ./internal/llm/prompt -run TestGetContextFromPaths`)
 - **Update Golden Files**: `go test ./... -update` (regenerates `.golden`
