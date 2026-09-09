@@ -63,8 +63,8 @@ func TestDownloadDomainGrantAutoApproves(t *testing.T) {
 
 	run := func(url, dest, callID string) (string, error) {
 		resp, err := tool.Run(ctx, fantasy.ToolCall{
-			ID:   callID,
-			Name: DownloadToolName,
+			ID:    callID,
+			Name:  DownloadToolName,
 			Input: `{"url":"` + url + `","file_path":"` + dest + `"}`,
 		})
 		return resp.Content, err
