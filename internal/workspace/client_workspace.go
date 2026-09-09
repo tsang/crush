@@ -349,6 +349,8 @@ func (w *ClientWorkspace) PermissionGrant(perm permission.PermissionRequest) boo
 			Action:      perm.Action,
 			Path:        perm.Path,
 			Params:      perm.Params,
+			Subject:     perm.Subject,
+			SubjectFull: perm.SubjectFull,
 		},
 		Action: proto.PermissionAllow,
 	})
@@ -366,6 +368,8 @@ func (w *ClientWorkspace) PermissionGrantPersistent(perm permission.PermissionRe
 			Action:      perm.Action,
 			Path:        perm.Path,
 			Params:      perm.Params,
+			Subject:     perm.Subject,
+			SubjectFull: perm.SubjectFull,
 		},
 		Action: proto.PermissionAllowForSession,
 	})
@@ -383,6 +387,8 @@ func (w *ClientWorkspace) PermissionDeny(perm permission.PermissionRequest) bool
 			Action:      perm.Action,
 			Path:        perm.Path,
 			Params:      perm.Params,
+			Subject:     perm.Subject,
+			SubjectFull: perm.SubjectFull,
 		},
 		Action: proto.PermissionDeny,
 	})
@@ -1111,6 +1117,9 @@ func (w *ClientWorkspace) translateEvent(ev any) tea.Msg {
 				Action:      e.Payload.Action,
 				Path:        e.Payload.Path,
 				Params:      e.Payload.Params,
+				Subject:     e.Payload.Subject,
+				SubjectFull: e.Payload.SubjectFull,
+				SubjectNew:  e.Payload.SubjectNew,
 			},
 		}
 	case pubsub.Event[proto.PermissionNotification]:

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
+	"mvdan.cc/sh/v3/syntax"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/config"
@@ -35,6 +36,75 @@ type BashPermissionsParams struct {
 	WorkingDir          string `json:"working_dir"`
 	RunInBackground     bool   `json:"run_in_background"`
 	AutoBackgroundAfter int    `json:"auto_background_after"`
+}
+
+// permissionSubjects derives both session grant tiers by walking the parsed
+// command with the same mvdan/sh grammar that executes it (run.go). The Cmd
+// tier is every literal binary in the tree; the Cmd+Args tier pairs each
+// simple command with its first bare-word, non-flag argument.
+//
+// Walking the AST instead of splitting the string means quoting, heredocs,
+// subshells, and command substitution are resolved by the parser rather than
+// re-derived here: a ';' inside a quoted argument stays one argument instead
+// of becoming a segment separator, pipeline tails are included because they
+// execute, and keywords like `for` are not simple commands so they can never
+// become a grantable binary.
+//
+// The derivation is fail-closed. A command that does not parse, or whose
+// primary is not a bare literal ("$BIN run"), yields permission.ScopeUnknown:
+// no grant can cover it and none can be minted from it.
+func permissionSubjects(command string) (cmd, args string) {
+	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	if err != nil {
+		return permission.ScopeUnknown, permission.ScopeUnknown
+	}
+	var bins, shapes []string
+	unknown := false
+	syntax.Walk(file, func(n syntax.Node) bool {
+		call, ok := n.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			// Compound commands and bare env assignments run nothing of
+			// their own; their bodies are visited separately.
+			return true
+		}
+		primary := call.Args[0].Lit()
+		if primary == "" {
+			unknown = true
+			return false
+		}
+		bin := filepath.Base(primary)
+		if !permission.ValidToken(bin) {
+			unknown = true
+			return false
+		}
+		bins = append(bins, bin)
+		shapes = append(shapes, subjectShape(bin, call.Args[1:]))
+		return true
+	})
+	if unknown || len(bins) == 0 || len(bins) > permission.MaxSubjectTokens {
+		return permission.ScopeUnknown, permission.ScopeUnknown
+	}
+	return permission.JoinTokens(bins), permission.JoinTokens(shapes)
+}
+
+// subjectShape pairs a binary with the first argument that reads as a
+// subcommand, stopping at the first positional word so quoted data cannot be
+// mistaken for one.
+func subjectShape(bin string, args []*syntax.Word) string {
+	for _, arg := range args {
+		word := arg.Lit()
+		if word == "" {
+			break
+		}
+		if strings.HasPrefix(word, "-") {
+			continue
+		}
+		if permission.ValidToken(word) {
+			return bin + " " + word
+		}
+		break
+	}
+	return bin
 }
 
 type BashResponseMetadata struct {
@@ -225,6 +295,7 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 				return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for executing shell command")
 			}
 			if !isSafeReadOnly {
+				cmdSubject, argsSubject := permissionSubjects(params.Command)
 				p, err := permissions.Request(
 					ctx,
 					permission.CreatePermissionRequest{
@@ -235,6 +306,8 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 						Action:      "execute",
 						Description: fmt.Sprintf("Execute command: %s", params.Command),
 						Params:      BashPermissionsParams(params),
+						Subject:     cmdSubject,
+						SubjectFull: argsSubject,
 					},
 				)
 				if err != nil {

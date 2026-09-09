@@ -15,7 +15,7 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [macos-latest, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -28,3 +28,12 @@ jobs:
       - run: git diff --exit-code
       - run: go build -race ./...
       - run: go test -race -failfast ./...
+      - name: Build darwin binary
+        if: matrix.os == 'macos-latest'
+        run: go build -o crush .
+      - name: Upload darwin binary
+        if: matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: crush-darwin
+          path: crush

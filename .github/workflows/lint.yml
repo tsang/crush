@@ -4,6 +4,15 @@ on:
     branches: [main]
   pull_request:
 
+# The reusable lint workflow asks for checks:write to annotate PRs. Forks
+# default to a read-only token, and a caller whose permissions fall short of
+# the callee's request fails validation at startup, so declare the same
+# scopes here that charmbracelet/meta's lint.yml declares.
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+
 jobs:
   lint:
     uses: charmbracelet/meta/.github/workflows/lint.yml@main
